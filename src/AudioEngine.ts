@@ -8,10 +8,16 @@ interface PendingAddTrack {
   reject:  (err: Error) => void;
 }
 
+interface PendingExport {
+  resolve: (data: { outL: Float32Array; outR: Float32Array }) => void;
+  reject:  (err: Error) => void;
+}
+
 export class AudioEngine {
   private port: IWorkletPort;
   private seq = 0;
   private pending = new Map<number, PendingAddTrack>();
+  private pendingExports = new Map<number, PendingExport>();
   private onPlayheadCb: ((position: number) => void) | null = null;
   /** Set by AudioEngine.create(). Used only for test instrumentation (tap()). */
   _node: AudioWorkletNode | null = null;
@@ -129,6 +135,13 @@ export class AudioEngine {
         this.pending.delete(msg.seq);
         pending.resolve(msg.id as number);
       }
+    } else if (msg.type === 'export_complete' && msg.seq !== undefined) {
+      const pe = this.pendingExports.get(msg.seq);
+      if (pe) {
+        this.pendingExports.delete(msg.seq);
+        const d = msg as { type: string; seq: number; outL: Float32Array; outR: Float32Array };
+        pe.resolve({ outL: d.outL, outR: d.outR });
+      }
     } else if (msg.type === 'playhead') {
       this.onPlayheadCb?.((msg as { type: string; position: number }).position);
     }
@@ -203,4 +216,12 @@ export class AudioEngine {
   play():                    void { this.port.postMessage({ type: 'cmd', fn: 'engine_play' }); }
   pause():                   void { this.port.postMessage({ type: 'cmd', fn: 'engine_pause' }); }
   seek(position: number):    void { this.port.postMessage({ type: 'cmd', fn: 'engine_seek', position }); }
+
+  exportRender(totalFrames: number, restorePosition: number): Promise<{ outL: Float32Array; outR: Float32Array }> {
+    const seq = this._nextSeq();
+    return new Promise((resolve, reject) => {
+      this.pendingExports.set(seq, { resolve, reject });
+      this.port.postMessage({ type: 'cmd', fn: 'engine_export', seq, totalFrames, restorePosition });
+    });
+  }
 }

@@ -86,6 +86,49 @@ class MixerProcessor extends AudioWorkletProcessor {
       case 'engine_pause':           e.engine_pause(); break;
       case 'engine_seek':            e.engine_seek(cmd.position); break;
       case 'engine_set_master_gain': e.engine_set_master_gain(cmd.value); break;
+
+      case 'engine_export': {
+        // Render the mix offline, synchronously, on the audio thread.
+        // This blocks process() for the duration but is safe — no concurrent access.
+        const { totalFrames, restorePosition, seq } = cmd;
+        const CHUNK = 4096;
+
+        const chunkPtrL = e.malloc(CHUNK * 4);
+        const chunkPtrR = e.malloc(CHUNK * 4);
+
+        const outL = new Float32Array(totalFrames);
+        const outR = new Float32Array(totalFrames);
+
+        // Capture pre-export state
+        const wasPlaying = !!e.engine_is_playing();
+        e.engine_seek(0);
+        e.engine_play();
+        this.exporting = true;
+
+        let written = 0;
+        while (written < totalFrames) {
+          const n = Math.min(CHUNK, totalFrames - written);
+          e.engine_process(chunkPtrL, chunkPtrR, n);
+          const heap = new Float32Array(e.memory.buffer);
+          outL.set(heap.subarray(chunkPtrL >> 2, (chunkPtrL >> 2) + n), written);
+          outR.set(heap.subarray(chunkPtrR >> 2, (chunkPtrR >> 2) + n), written);
+          written += n;
+        }
+
+        this.exporting = false;
+        e.engine_pause();
+        e.engine_seek(restorePosition ?? 0);
+        if (wasPlaying) e.engine_play();
+
+        e.free(chunkPtrL);
+        e.free(chunkPtrR);
+
+        this.port.postMessage(
+          { type: 'export_complete', seq, outL, outR },
+          [outL.buffer, outR.buffer],
+        );
+        break;
+      }
     }
   }
 

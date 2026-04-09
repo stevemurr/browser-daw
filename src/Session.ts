@@ -276,6 +276,26 @@ export class Session {
   makeSetMasterGain(to: number): Command {
     return new SetMasterGainCommand(this, this.engine, this.masterGain, to);
   }
+
+  /** Renders the full mix offline and triggers a WAV download. */
+  async exportMix(sampleRate = 44100): Promise<void> {
+    let totalFrames = 0;
+    for (const region of this.regions.values()) {
+      const end = region.startFrame + (region.trimEndFrame - region.trimStartFrame);
+      if (end > totalFrames) totalFrames = end;
+    }
+    if (totalFrames === 0) return;
+
+    const { outL, outR } = await this.engine.exportRender(totalFrames, 0);
+    const wav = _encodeWav(outL, outR, sampleRate);
+    const blob = new Blob([wav], { type: 'audio/wav' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'mix.wav';
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 }
 
 // ── Concrete commands ─────────────────────────────────────────────────────────
@@ -639,4 +659,37 @@ class SetMasterGainCommand implements Command {
     this.engine.setMasterGain(this.from);
     this.session._setMasterGain(this.from);
   }
+}
+
+// ── WAV encoder ───────────────────────────────────────────────────────────────
+
+function _encodeWav(outL: Float32Array, outR: Float32Array, sampleRate: number): ArrayBuffer {
+  const numFrames    = outL.length;
+  const numChannels  = 2;
+  const bitsPerSample = 16;
+  const byteRate     = sampleRate * numChannels * bitsPerSample / 8;
+  const blockAlign   = numChannels * bitsPerSample / 8;
+  const dataBytes    = numFrames * blockAlign;
+  const buf          = new ArrayBuffer(44 + dataBytes);
+  const view         = new DataView(buf);
+
+  const str = (off: number, s: string) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+
+  str(0, 'RIFF');  view.setUint32(4,  36 + dataBytes, true);
+  str(8, 'WAVE');
+  str(12, 'fmt '); view.setUint32(16, 16,           true);
+  view.setUint16(20, 1,            true);  // PCM
+  view.setUint16(22, numChannels,  true);
+  view.setUint32(24, sampleRate,   true);
+  view.setUint32(28, byteRate,     true);
+  view.setUint16(32, blockAlign,   true);
+  view.setUint16(34, bitsPerSample,true);
+  str(36, 'data'); view.setUint32(40, dataBytes,    true);
+
+  let off = 44;
+  for (let i = 0; i < numFrames; i++) {
+    view.setInt16(off, Math.max(-1, Math.min(1, outL[i])) * 0x7fff, true); off += 2;
+    view.setInt16(off, Math.max(-1, Math.min(1, outR[i])) * 0x7fff, true); off += 2;
+  }
+  return buf;
 }

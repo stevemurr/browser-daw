@@ -20,6 +20,18 @@ body { background: #1a1a1a; color: #e0e0e0; font-family: monospace; }
 .transport-label { font-size: 0.75rem; color: #888; }
 .transport-master-slider { width: 90px; accent-color: #4080c0; }
 .btn-transport-play { min-width: 2.2rem; text-align: center; }
+.btn-export {
+  padding: 0.35rem 0.75rem;
+  background: #1a2a3a;
+  border: 1px solid #4080c0;
+  color: #80b0e0;
+  cursor: pointer;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 0.85rem;
+}
+.btn-export:hover:not(:disabled) { background: #243444; }
+.btn-export:disabled { opacity: 0.5; cursor: default; }
 
 /* ── Arrange view (full remaining height) ───────────────────────────────── */
 .arrange-view {

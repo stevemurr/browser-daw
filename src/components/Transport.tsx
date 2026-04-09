@@ -24,6 +24,17 @@ export function Transport({ session, state, isPlaying, playhead, onPlay, onPause
     if (!dragging.current) setLocalDb(linearToDb(state.masterGain));
   }, [state.masterGain]);
 
+  const [exporting, setExporting] = useState(false);
+
+  async function handleExport() {
+    setExporting(true);
+    try {
+      await session.exportMix();
+    } finally {
+      setExporting(false);
+    }
+  }
+
   return (
     <div className="transport">
       <button className="btn-transport-play" onClick={isPlaying ? onPause : onPlay}>
@@ -69,6 +80,15 @@ export function Transport({ session, state, isPlaying, playhead, onPlay, onPause
         }}
       />
       <span className="transport-label">{formatDb(localDb)}</span>
+
+      <button
+        className="btn-export"
+        disabled={exporting}
+        onClick={handleExport}
+        style={{ marginLeft: 'auto' }}
+      >
+        {exporting ? 'Exporting…' : 'Export'}
+      </button>
     </div>
   );
 }
