@@ -27,7 +27,7 @@ EXPORTED_FUNCTIONS='[
 ]'
 
 emcc \
-  engine.c track.c eq.c \
+  engine.c track.c eq.c compressor.c distortion.c limiter.c delay.c chorus.c reverb.c \
   -O0 -g \
   -lm \
   -s WASM=1 \

@@ -1,5 +1,11 @@
 #include "engine.h"
 #include "track.h"
+#include "compressor.h"
+#include "distortion.h"
+#include "limiter.h"
+#include "delay.h"
+#include "chorus.h"
+#include "reverb.h"
 #include "plugin_ids.h"
 #include <stdlib.h>
 #include <string.h>
@@ -104,7 +110,24 @@ void engine_plugin_set_param(int id, int plugin_id, int param_id, float value) {
         case PLUGIN_EQ:
             eq_set_param(&g_tracks[id].eq, param_id, value, g_sample_rate);
             break;
-        /* future plugins: case PLUGIN_COMPRESSOR: ... */
+        case PLUGIN_COMPRESSOR:
+            compressor_set_param(&g_tracks[id].compressor, param_id, value);
+            break;
+        case PLUGIN_DISTORTION:
+            distortion_set_param(&g_tracks[id].distortion, param_id, value);
+            break;
+        case PLUGIN_LIMITER:
+            limiter_set_param(&g_tracks[id].limiter, param_id, value);
+            break;
+        case PLUGIN_DELAY:
+            delay_set_param(&g_tracks[id].delay, param_id, value);
+            break;
+        case PLUGIN_CHORUS:
+            chorus_set_param(&g_tracks[id].chorus, param_id, value);
+            break;
+        case PLUGIN_REVERB:
+            reverb_set_param(&g_tracks[id].reverb, param_id, value);
+            break;
     }
 }
 
@@ -120,6 +143,11 @@ void  engine_seek (long pos) {
             biquad_reset(&g_tracks[i].eq.bands[b].filters[0]);
             biquad_reset(&g_tracks[i].eq.bands[b].filters[1]);
         }
+        compressor_reset(&g_tracks[i].compressor);
+        limiter_reset(&g_tracks[i].limiter);
+        delay_reset(&g_tracks[i].delay);
+        chorus_reset(&g_tracks[i].chorus);
+        reverb_reset(&g_tracks[i].reverb);
     }
 }
 long  engine_get_playhead (void) { return g_playhead; }

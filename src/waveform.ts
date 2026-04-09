@@ -81,3 +81,29 @@ export async function computePeaksAsync(
 
   return { regionId: '', peaksL, peaksR, blockSize };
 }
+
+// ── dB / linear conversion ────────────────────────────────────────────────────
+
+/** Convert a linear gain value (0 = silence, 1 = unity) to dB. Returns -Infinity for 0. */
+export function linearToDb(linear: number): number {
+  if (linear <= 0) return -Infinity;
+  return 20 * Math.log10(linear);
+}
+
+/**
+ * Convert dB to linear gain.
+ * Values at or below the -60 dB floor map to 0 so the engine truly mutes.
+ */
+export function dbToLinear(db: number): number {
+  if (!isFinite(db) || db <= -60) return 0;
+  return Math.pow(10, db / 20);
+}
+
+/**
+ * Format a dB value for display.
+ * At the -60 dB floor shows "−∞", positive values get a leading "+".
+ */
+export function formatDb(db: number): string {
+  if (!isFinite(db) || db <= -60) return '−∞';
+  return (db >= 0 ? '+' : '') + db.toFixed(1) + ' dB';
+}

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import type { Session } from '../Session.js';
 import type { TrackMirror } from '../types.js';
 import { EQPanel } from './EQPanel.js';
+import { linearToDb, dbToLinear, formatDb } from '../waveform.js';
 
 interface Props {
   session: Session;
@@ -11,13 +12,13 @@ interface Props {
 export function TrackStrip({ session, track }: Props) {
   const [showEQ, setShowEQ] = useState(false);
 
-  const [localGain, setLocalGain] = useState(track.gain);
+  const [localDb, setLocalDb] = useState(() => linearToDb(track.gain));
   const [localPan, setLocalPan] = useState(track.pan);
   const gainDragging = useRef(false);
   const panDragging = useRef(false);
 
   useEffect(() => {
-    if (!gainDragging.current) setLocalGain(track.gain);
+    if (!gainDragging.current) setLocalDb(linearToDb(track.gain));
   }, [track.gain]);
 
   useEffect(() => {
@@ -38,23 +39,24 @@ export function TrackStrip({ session, track }: Props) {
       <div className="param-row">
         <label>Vol</label>
         <input
-          type="range" min={0} max={2} step={0.01}
-          value={localGain}
+          type="range" min={-60} max={6} step={0.1}
+          value={localDb}
           onMouseDown={() => { gainDragging.current = true; }}
           onChange={e => {
-            const v = parseFloat(e.target.value);
-            setLocalGain(v);
+            const db = parseFloat(e.target.value);
+            setLocalDb(db);
+            const linear = dbToLinear(db);
             for (const r of session.regionsForTrack(track.stableId)) {
-              session.getEngine().setGain(r.engineSlot, v);
+              session.getEngine().setGain(r.engineSlot, linear);
             }
           }}
           onMouseUp={e => {
             gainDragging.current = false;
-            const v = parseFloat((e.target as HTMLInputElement).value);
-            session.execute(session.makeSetGain(track.stableId, v));
+            const db = parseFloat((e.target as HTMLInputElement).value);
+            session.execute(session.makeSetGain(track.stableId, dbToLinear(db)));
           }}
         />
-        <span>{Math.round(localGain * 100)}%</span>
+        <span>{formatDb(localDb)}</span>
       </div>
 
       {/* Pan */}

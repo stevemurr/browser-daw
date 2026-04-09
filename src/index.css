@@ -19,6 +19,7 @@ body { background: #1a1a1a; color: #e0e0e0; font-family: monospace; }
 .transport-sep { color: #444; user-select: none; }
 .transport-label { font-size: 0.75rem; color: #888; }
 .transport-master-slider { width: 90px; accent-color: #4080c0; }
+.btn-transport-play { min-width: 2.2rem; text-align: center; }
 
 /* ── Arrange view (full remaining height) ───────────────────────────────── */
 .arrange-view {
@@ -144,7 +145,7 @@ body { background: #1a1a1a; color: #e0e0e0; font-family: monospace; }
 .th-param-row span {
   font-size: 0.65rem;
   color: #888;
-  min-width: 26px;
+  min-width: 38px;
   text-align: right;
 }
 
@@ -169,6 +170,96 @@ body { background: #1a1a1a; color: #e0e0e0; font-family: monospace; }
 .btn-mute:hover, .btn-solo:hover { background: #333; }
 .btn-mute.active  { background: #a03030; border-color: #e04040; color: white; }
 .btn-solo.active  { background: #806000; border-color: #f0c040; color: white; }
+
+.btn-dsp {
+  flex: 0 0 auto;
+  padding: 2px 5px;
+  border: 1px solid #444;
+  background: #2a2a2a;
+  color: #aaa;
+  cursor: pointer;
+  border-radius: 3px;
+  font-size: 0.85rem;
+  font-family: monospace;
+  line-height: 1;
+}
+.btn-dsp:hover { background: #333; color: #e0e0e0; }
+.btn-dsp.active { background: #1a2a3a; border-color: #4080c0; color: #80b0e0; }
+
+/* ── DSP Overlay (portal, position: fixed) ──────────────────────────────── */
+.dsp-overlay {
+  position: fixed;
+  z-index: 1000;
+  background: #18181e;
+  border: 1px solid #3a3a5a;
+  border-radius: 6px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  max-height: 560px;
+  overflow: hidden;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.dsp-overlay-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid #2a2a3a;
+  background: #111118;
+  border-radius: 6px 6px 0 0;
+  flex-shrink: 0;
+}
+.dsp-overlay-title {
+  font-size: 0.72rem;
+  color: #9090c0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+.dsp-overlay-close {
+  background: none;
+  border: none;
+  color: #666;
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 0 2px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.dsp-overlay-close:hover { color: #e0e0e0; }
+
+/* Two-column body */
+.dsp-overlay-body {
+  display: flex;
+  flex-direction: row;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+.dsp-overlay-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.dsp-overlay-col:first-child {
+  border-right: 1px solid #2a2a3a;
+}
+
+.dsp-overlay-section {
+  padding: 8px 8px 4px;
+  border-bottom: 1px solid #2a2a3a;
+}
+.dsp-overlay-section:last-child { border-bottom: none; }
+.dsp-overlay-section-label {
+  font-size: 0.62rem;
+  color: #5050a0;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 6px;
+}
 
 /* ── Track lane ─────────────────────────────────────────────────────────── */
 .track-lane {
@@ -207,8 +298,110 @@ body { background: #1a1a1a; color: #e0e0e0; font-family: monospace; }
   will-change: transform;
 }
 
-/* ── EQ panel (kept for future use, not shown in track header) ──────────── */
-.eq-panel     { background: #1a1a2e; border: 1px solid #334; border-radius: 4px;
-                padding: 0.5rem; display: flex; flex-direction: column; gap: 0.5rem; }
-.eq-band      { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.75rem; }
-.eq-band-label { color: #80a0ff; font-size: 0.7rem; font-weight: bold; }
+/* ── Shared DSP module header (ON/OFF top-right) ────────────────────────── */
+.dsp-module-header {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  padding: 0 2px 4px;
+}
+.btn-bypass {
+  padding: 1px 6px;
+  font-size: 0.65rem;
+  font-family: monospace;
+  background: #222;
+  border: 1px solid #444;
+  color: #888;
+  cursor: pointer;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.btn-bypass.active { background: #1a2a3a; border-color: #4080c0; color: #80b0e0; }
+
+/* ── Visual EQ canvas ───────────────────────────────────────────────────── */
+.eq-canvas-wrap { display: flex; flex-direction: column; gap: 0; }
+.eq-canvas      { display: block; cursor: crosshair; border-radius: 3px; }
+.eq-canvas-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px 0;
+  min-height: 18px;
+}
+.eq-canvas-info { font-size: 0.65rem; color: #5a5a7a; }
+
+/* ── Compressor panel ───────────────────────────────────────────────────── */
+.compressor-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 0 4px;
+}
+.compressor-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.compressor-value {
+  font-size: 0.65rem;
+  color: #666;
+  min-width: 22px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+/* ── Distortion panel ───────────────────────────────────────────────── */
+.distortion-panel { display: flex; flex-direction: column; gap: 4px; padding: 0 0 4px; }
+.distortion-mode-pills { display: flex; gap: 3px; }
+.distortion-pill {
+  padding: 1px 7px; font-size: 0.6rem; font-family: monospace;
+  background: #1e1e1e; border: 1px solid #3a3a3a; color: #666;
+  cursor: pointer; border-radius: 3px;
+}
+.distortion-pill.active { background: #2a1a3a; border-color: #8040c0; color: #c080f0; }
+.distortion-row { display: flex; align-items: center; gap: 6px; }
+.distortion-row-label { font-size: 0.6rem; color: #555; min-width: 28px; }
+.distortion-value { font-size: 0.65rem; color: #666; min-width: 22px; text-align: right; flex-shrink: 0; }
+
+/* ── Limiter panel ──────────────────────────────────────────────────── */
+.limiter-panel { display: flex; flex-direction: column; gap: 4px; padding: 0 0 4px; }
+.limiter-row { display: flex; align-items: center; gap: 6px; }
+.limiter-row-label { font-size: 0.6rem; color: #555; min-width: 50px; }
+.limiter-value { font-size: 0.65rem; color: #666; min-width: 36px; text-align: right; flex-shrink: 0; }
+
+/* ── Delay panel ────────────────────────────────────────────────────── */
+.delay-panel { display: flex; flex-direction: column; gap: 4px; padding: 0 0 4px; }
+.delay-div-row { display: flex; align-items: center; gap: 3px; flex-wrap: wrap; }
+.delay-pill {
+  padding: 1px 6px; font-size: 0.6rem; font-family: monospace;
+  background: #1e1e1e; border: 1px solid #3a3a3a; color: #666;
+  cursor: pointer; border-radius: 3px;
+}
+.delay-pill.active { background: #0a2a1a; border-color: #20a060; color: #40c080; }
+.delay-bpm-input {
+  width: 38px; background: #1a1a1a; border: 1px solid #333; color: #888;
+  font-family: monospace; font-size: 0.6rem; padding: 1px 3px; border-radius: 3px;
+  text-align: center;
+}
+.delay-row { display: flex; align-items: center; gap: 6px; }
+.delay-row-label { font-size: 0.6rem; color: #555; min-width: 48px; }
+.delay-value { font-size: 0.65rem; color: #666; min-width: 40px; text-align: right; flex-shrink: 0; }
+
+/* ── Chorus panel ───────────────────────────────────────────────────── */
+.chorus-panel { display: flex; flex-direction: column; gap: 4px; padding: 0 0 4px; }
+.chorus-row { display: flex; align-items: center; gap: 6px; }
+.chorus-row-label { font-size: 0.6rem; color: #555; min-width: 32px; }
+.chorus-value { font-size: 0.65rem; color: #666; min-width: 44px; text-align: right; flex-shrink: 0; }
+
+/* ── Reverb panel ───────────────────────────────────────────────────── */
+.reverb-panel { display: flex; flex-direction: column; gap: 4px; padding: 0 0 4px; }
+.reverb-preset-pills { display: flex; gap: 3px; }
+.reverb-pill {
+  padding: 1px 7px; font-size: 0.6rem; font-family: monospace;
+  background: #1e1e1e; border: 1px solid #3a3a3a; color: #666;
+  cursor: pointer; border-radius: 3px;
+}
+.reverb-pill.active { background: #1a2a1a; border-color: #40a060; color: #60d080; }
+.reverb-row { display: flex; align-items: center; gap: 6px; }
+.reverb-row-label { font-size: 0.6rem; color: #555; min-width: 28px; }
+.reverb-value { font-size: 0.65rem; color: #666; min-width: 22px; text-align: right; flex-shrink: 0; }

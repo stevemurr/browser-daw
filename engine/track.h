@@ -2,6 +2,12 @@
 #define TRACK_H
 
 #include "eq.h"
+#include "compressor.h"
+#include "distortion.h"
+#include "limiter.h"
+#include "delay.h"
+#include "chorus.h"
+#include "reverb.h"
 
 #define MAX_TRACKS 32
 
@@ -19,7 +25,13 @@ typedef struct {
     int     muted;
     int     soloed;
 
-    TrackEQ eq;
+    TrackEQ    eq;
+    Compressor compressor;
+    Distortion distortion;
+    Limiter    limiter;
+    Delay      delay;
+    Chorus     chorus;
+    Reverb     reverb;
 } Track;
 
 void track_init  (Track* t, float sample_rate);
