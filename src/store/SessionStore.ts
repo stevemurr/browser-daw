@@ -21,13 +21,13 @@ export async function saveSession(session: SerializedSession): Promise<void> {
 }
 
 export async function loadSession(sessionId: string): Promise<SerializedSession | null> {
-  const db     = await dbPromise;
+  const db     = await getDb();
   const result = await idbGet<SerializedSession>(db, 'sessions', sessionId);
   return result ?? null;
 }
 
 export async function listSessions(): Promise<SessionListItem[]> {
-  const db  = await dbPromise;
+  const db  = await getDb();
   const all = await idbGetAll<SerializedSession>(db, 'sessions');
   return all
     .map(({ sessionId, name, createdAt, updatedAt }) => ({ sessionId, name, createdAt, updatedAt }))
