@@ -13,7 +13,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 interface EmscriptenModule {
   _malloc(bytes: number): number;
   _free(ptr: number): void;
-  _engine_add_track(pL: number, pR: number, frames: number, sr: number): number;
+  _engine_add_track_chunked(frames: number, sr: number): number;
+  _engine_load_chunk(slot: number, pL: number, pR: number, chunkStart: number, chunkLength: number): void;
   _engine_remove_track(id: number): void;
   _engine_set_gain(id: number, v: number): void;
   _engine_set_pan(id: number, v: number): void;
@@ -77,18 +78,21 @@ export class SimulatedWorklet implements IWorkletPort {
     const M = this.M;
 
     switch (cmd.fn) {
-      case 'engine_add_track': {
-        const { pcmL, pcmR, numFrames, sampleRate, seq } = cmd as AddTrackMsg;
-        const pL = M._malloc(numFrames * 4);
-        const pR = pcmR ? M._malloc(numFrames * 4) : 0;
-
-        M.HEAPF32.set(pcmL, pL >> 2);
-        if (pcmR) M.HEAPF32.set(pcmR, pR >> 2);
-
-        const id = M._engine_add_track(pL, pR, numFrames, sampleRate);
-        // pL/pR ownership transferred to the engine; track_free() will free() them.
-
-        this.onmessage?.({ data: { type: 'track_added', id, seq } });
+      case 'engine_add_track_chunked': {
+        const { numFrames, sampleRate, seq } = cmd as AddTrackChunkedMsg;
+        const slot = M._engine_add_track_chunked(numFrames, sampleRate);
+        this.onmessage?.({ data: { type: 'track_added_chunked', slot, seq } });
+        break;
+      }
+      case 'engine_load_chunk': {
+        const { slot, chunkL, chunkR, chunkStart, chunkLength, seq } = cmd as LoadChunkMsg;
+        const pL = M._malloc(chunkLength * 4);
+        const pR = chunkR ? M._malloc(chunkLength * 4) : 0;
+        M.HEAPF32.set(chunkL, pL >> 2);
+        if (chunkR) M.HEAPF32.set(chunkR, pR >> 2);
+        // Ownership transferred to C engine; engine_load_chunk frees the old chunk.
+        M._engine_load_chunk(slot, pL, pR, chunkStart, chunkLength);
+        this.onmessage?.({ data: { type: 'chunk_loaded', slot, seq } });
         break;
       }
       case 'engine_remove_track':       M._engine_remove_track((cmd as IdCmd).id); break;
@@ -104,7 +108,12 @@ export class SimulatedWorklet implements IWorkletPort {
       }
       case 'engine_play':            M._engine_play(); break;
       case 'engine_pause':           M._engine_pause(); break;
-      case 'engine_seek':            M._engine_seek((cmd as SeekCmd).position); break;
+      case 'engine_seek': {
+        const pos = (cmd as SeekCmd).position;
+        M._engine_seek(pos);
+        this.onmessage?.({ data: { type: 'seek_done', position: pos } });
+        break;
+      }
       case 'engine_set_master_gain': M._engine_set_master_gain((cmd as MasterGainCmd).value); break;
     }
   }
@@ -139,19 +148,21 @@ export class SimulatedWorklet implements IWorkletPort {
 
 // ── Internal message type helpers ─────────────────────────────────────────────
 
-interface CmdMsg          { type: 'cmd'; fn: string }
-interface IdCmd           extends CmdMsg { id: number }
-interface StartFrameCmd   extends IdCmd  { startFrame: number }
-interface ValueCmd        extends IdCmd  { value: number }
-interface MuteCmd        extends IdCmd  { muted: boolean }
-interface SoloCmd        extends IdCmd  { soloed: boolean }
-interface PluginParamCmd extends IdCmd  { pluginId: number; paramId: number; value: number }
-interface SeekCmd        extends CmdMsg { position: number }
-interface MasterGainCmd  extends CmdMsg { value: number }
-interface AddTrackMsg    extends CmdMsg {
+interface CmdMsg               { type: 'cmd'; fn: string }
+interface IdCmd                extends CmdMsg { id: number }
+interface StartFrameCmd        extends IdCmd  { startFrame: number }
+interface ValueCmd             extends IdCmd  { value: number }
+interface MuteCmd              extends IdCmd  { muted: boolean }
+interface SoloCmd              extends IdCmd  { soloed: boolean }
+interface PluginParamCmd       extends IdCmd  { pluginId: number; paramId: number; value: number }
+interface SeekCmd              extends CmdMsg { position: number }
+interface MasterGainCmd        extends CmdMsg { value: number }
+interface AddTrackChunkedMsg   extends CmdMsg { seq: number; numFrames: number; sampleRate: number }
+interface LoadChunkMsg         extends CmdMsg {
   seq: number;
-  pcmL: Float32Array;
-  pcmR: Float32Array | null;
-  numFrames: number;
-  sampleRate: number;
+  slot: number;
+  chunkL: Float32Array;
+  chunkR: Float32Array | null;
+  chunkStart: number;
+  chunkLength: number;
 }

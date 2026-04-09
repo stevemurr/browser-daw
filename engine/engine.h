@@ -2,10 +2,12 @@
 #define ENGINE_H
 
 /* Track lifecycle */
-int  engine_add_track   (float* pcm_L, float* pcm_R,
-                         long num_frames, float sample_rate);
-void engine_remove_track(int track_id);
-int  engine_get_track_count(void);
+int  engine_add_track_chunked(long num_frames, float sample_rate);
+void engine_load_chunk       (int track_id, float* chunk_L, float* chunk_R,
+                              long chunk_start, long chunk_length);
+long engine_chunk_remaining  (int track_id, long playhead);
+void engine_remove_track     (int track_id);
+int  engine_get_track_count  (void);
 
 /* Per-track params */
 void engine_set_gain       (int track_id, float gain);

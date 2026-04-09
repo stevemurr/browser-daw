@@ -32,14 +32,22 @@ void tearDown(void) {
 
 /* ── Helpers ────────────────────────────────────────────────────────────── */
 
-/* Allocate a PCM buffer filled with `value` and add it as a track. */
+/* Allocate a PCM buffer filled with `value` and add it as a track.
+   Uses the chunked API: engine_add_track_chunked() allocates the slot, then
+   engine_load_chunk() takes ownership of the malloc'd buffers. */
 static int add_constant_track(float value) {
     float *sig_L = malloc(PCM_LEN * sizeof(float));
     float *sig_R = malloc(PCM_LEN * sizeof(float));
     for (int i = 0; i < PCM_LEN; i++) { sig_L[i] = value; sig_R[i] = value; }
-    int tid = engine_add_track(sig_L, sig_R, PCM_LEN, 44100.0f);
-    free(sig_L);
-    free(sig_R);
+    int tid = engine_add_track_chunked(PCM_LEN, 44100.0f);
+    if (tid >= 0) {
+        /* chunk_start=0, chunk_length=PCM_LEN — the full file fits in one chunk */
+        engine_load_chunk(tid, sig_L, sig_R, 0, PCM_LEN);
+        /* ownership transferred; do NOT free sig_L/sig_R here */
+    } else {
+        free(sig_L);
+        free(sig_R);
+    }
     return tid;
 }
 
@@ -61,9 +69,9 @@ void test_silence_when_paused(void) {
 void test_silent_track_yields_silence(void) {
     float *pcm_L = calloc(PCM_LEN, sizeof(float));
     float *pcm_R = calloc(PCM_LEN, sizeof(float));
-    g_tid = engine_add_track(pcm_L, pcm_R, PCM_LEN, 44100.0f);
-    free(pcm_L);
-    free(pcm_R);
+    g_tid = engine_add_track_chunked(PCM_LEN, 44100.0f);
+    engine_load_chunk(g_tid, pcm_L, pcm_R, 0, PCM_LEN);
+    /* ownership transferred — do NOT free pcm_L/pcm_R */
 
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, g_tid);
 
@@ -80,9 +88,9 @@ void test_silent_track_yields_silence(void) {
 void test_playhead_advances_by_block_size(void) {
     float *pcm_L = calloc(PCM_LEN, sizeof(float));
     float *pcm_R = calloc(PCM_LEN, sizeof(float));
-    g_tid = engine_add_track(pcm_L, pcm_R, PCM_LEN, 44100.0f);
-    free(pcm_L);
-    free(pcm_R);
+    g_tid = engine_add_track_chunked(PCM_LEN, 44100.0f);
+    engine_load_chunk(g_tid, pcm_L, pcm_R, 0, PCM_LEN);
+    /* ownership transferred */
 
     float out_L[FRAMES], out_R[FRAMES];
     engine_play();
@@ -97,9 +105,9 @@ void test_nonzero_pcm_produces_audible_output(void) {
     float *sig_R = malloc(PCM_LEN * sizeof(float));
     for (int i = 0; i < PCM_LEN; i++) { sig_L[i] = 0.5f; sig_R[i] = 0.5f; }
 
-    g_tid = engine_add_track(sig_L, sig_R, PCM_LEN, 44100.0f);
-    free(sig_L);
-    free(sig_R);
+    g_tid = engine_add_track_chunked(PCM_LEN, 44100.0f);
+    engine_load_chunk(g_tid, sig_L, sig_R, 0, PCM_LEN);
+    /* ownership transferred */
 
     engine_play();
 

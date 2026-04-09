@@ -34,6 +34,43 @@ function makePCM(frames: number, value = 0.5): Float32Array {
   return new Float32Array(frames).fill(value);
 }
 
+/**
+ * Helper: add a track using the new chunked API.
+ * 1. engine_add_track_chunked → awaits track_added_chunked (get slot)
+ * 2. engine_load_chunk        → awaits chunk_loaded
+ * Returns the assigned slot id.
+ */
+async function addTrackChunked(
+  proc: ProcessorInstance,
+  pcmL: Float32Array,
+  pcmR: Float32Array | null,
+  seq: number,
+): Promise<number> {
+  const numFrames = pcmL.length;
+
+  // Step 1: allocate slot
+  const chunkedMsg = proc.port.nextMessage('track_added_chunked');
+  proc.port.deliver({
+    type: 'cmd', fn: 'engine_add_track_chunked',
+    numFrames, sampleRate: 44100,
+    seq,
+  });
+  const reply = await chunkedMsg as { type: string; slot: number; seq: number };
+  const slot = reply.slot;
+
+  // Step 2: load initial chunk (full PCM for these tests — well within CHUNK_FRAMES)
+  const loadedMsg = proc.port.nextMessage('chunk_loaded');
+  proc.port.deliver({
+    type: 'cmd', fn: 'engine_load_chunk',
+    slot, chunkL: pcmL, chunkR: pcmR,
+    chunkStart: 0, chunkLength: numFrames,
+    seq: seq + 1000, // different seq to avoid collision
+  });
+  await loadedMsg;
+
+  return slot;
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 describe('initialization', () => {
@@ -64,32 +101,20 @@ describe('initialization', () => {
   });
 });
 
-describe('engine_add_track command', () => {
-  it('copies PCM into WASM heap and returns a valid slot', async () => {
+describe('engine_add_track_chunked + engine_load_chunk commands', () => {
+  it('add_track_chunked returns a valid slot, load_chunk confirms load', async () => {
     const proc = await initProcessor();
-    const pcmL = makePCM(1024, 0.5);
-
-    const msg = proc.port.nextMessage('track_added');
-    proc.port.deliver({
-      type: 'cmd', fn: 'engine_add_track',
-      pcmL, pcmR: null,
-      numFrames: 1024, sampleRate: 44100,
-      seq: 7,
-    });
-
-    const reply = await msg as { type: string; id: number; seq: number };
-    expect(reply.type).toBe('track_added');
-    expect(reply.id).toBeGreaterThanOrEqual(0);
-    expect(reply.id).toBeLessThan(32);
+    const slot = await addTrackChunked(proc, makePCM(1024, 0.5), null, 7);
+    expect(slot).toBeGreaterThanOrEqual(0);
+    expect(slot).toBeLessThan(32);
   });
 
   it('echoes seq so concurrent addTrack calls can be correlated', async () => {
     const proc = await initProcessor();
 
-    const msg1 = proc.port.nextMessage('track_added');
+    const msg1 = proc.port.nextMessage('track_added_chunked');
     proc.port.deliver({
-      type: 'cmd', fn: 'engine_add_track',
-      pcmL: makePCM(512), pcmR: null,
+      type: 'cmd', fn: 'engine_add_track_chunked',
       numFrames: 512, sampleRate: 44100, seq: 42,
     });
     const r1 = await msg1 as { seq: number };
@@ -99,34 +124,28 @@ describe('engine_add_track command', () => {
 
 describe('mixer commands', () => {
   let proc: ProcessorInstance;
+  let slot: number;
 
   beforeEach(async () => {
     proc = await initProcessor();
-    // Add a track so slot 0 is active
-    const added = proc.port.nextMessage('track_added');
-    proc.port.deliver({
-      type: 'cmd', fn: 'engine_add_track',
-      pcmL: makePCM(44100), pcmR: null,
-      numFrames: 44100, sampleRate: 44100, seq: 1,
-    });
-    await added;
+    slot = await addTrackChunked(proc, makePCM(44100), null, 1);
   });
 
   it('engine_set_gain does not throw', () => {
     expect(() =>
-      proc.port.deliver({ type: 'cmd', fn: 'engine_set_gain', id: 0, value: 0.5 }),
+      proc.port.deliver({ type: 'cmd', fn: 'engine_set_gain', id: slot, value: 0.5 }),
     ).not.toThrow();
   });
 
   it('engine_set_mute does not throw', () => {
     expect(() =>
-      proc.port.deliver({ type: 'cmd', fn: 'engine_set_mute', id: 0, muted: true }),
+      proc.port.deliver({ type: 'cmd', fn: 'engine_set_mute', id: slot, muted: true }),
     ).not.toThrow();
   });
 
   it('engine_set_pan does not throw', () => {
     expect(() =>
-      proc.port.deliver({ type: 'cmd', fn: 'engine_set_pan', id: 0, value: -0.5 }),
+      proc.port.deliver({ type: 'cmd', fn: 'engine_set_pan', id: slot, value: -0.5 }),
     ).not.toThrow();
   });
 
@@ -135,7 +154,7 @@ describe('mixer commands', () => {
     expect(() =>
       proc.port.deliver({
         type: 'cmd', fn: 'engine_plugin_set_param',
-        id: 0, pluginId: 0, paramId: 2, value: 6.0,
+        id: slot, pluginId: 0, paramId: 2, value: 6.0,
       }),
     ).not.toThrow();
   });
@@ -144,30 +163,18 @@ describe('mixer commands', () => {
 describe('engine_set_start_frame command', () => {
   it('does not throw for a valid track slot', async () => {
     const proc = await initProcessor();
-    const added = proc.port.nextMessage('track_added');
-    proc.port.deliver({
-      type: 'cmd', fn: 'engine_add_track',
-      pcmL: makePCM(44100), pcmR: null,
-      numFrames: 44100, sampleRate: 44100, seq: 1,
-    });
-    await added;
+    const slot = await addTrackChunked(proc, makePCM(44100), null, 1);
     expect(() =>
-      proc.port.deliver({ type: 'cmd', fn: 'engine_set_start_frame', id: 0, startFrame: 44100 }),
+      proc.port.deliver({ type: 'cmd', fn: 'engine_set_start_frame', id: slot, startFrame: 44100 }),
     ).not.toThrow();
   });
 
   it('delays audio output by the given frame count', async () => {
     const proc = await initProcessor();
-    const added = proc.port.nextMessage('track_added');
-    proc.port.deliver({
-      type: 'cmd', fn: 'engine_add_track',
-      pcmL: makePCM(44100, 0.5), pcmR: null,
-      numFrames: 44100, sampleRate: 44100, seq: 1,
-    });
-    await added;
+    const slot = await addTrackChunked(proc, makePCM(44100, 0.5), null, 1);
 
     // start_frame=256 → first two 128-frame blocks must be silent
-    proc.port.deliver({ type: 'cmd', fn: 'engine_set_start_frame', id: 0, startFrame: 256 });
+    proc.port.deliver({ type: 'cmd', fn: 'engine_set_start_frame', id: slot, startFrame: 256 });
     proc.port.deliver({ type: 'cmd', fn: 'engine_play' });
 
     const L1 = new Float32Array(128);
@@ -199,13 +206,7 @@ describe('process()', () => {
 
   it('outputs silence when engine is not playing', async () => {
     const proc = await initProcessor();
-    const added = proc.port.nextMessage('track_added');
-    proc.port.deliver({
-      type: 'cmd', fn: 'engine_add_track',
-      pcmL: makePCM(44100, 0.8), pcmR: null,
-      numFrames: 44100, sampleRate: 44100, seq: 1,
-    });
-    await added;
+    await addTrackChunked(proc, makePCM(44100, 0.8), null, 1);
     // Engine not playing — output should be silent
     const L = new Float32Array(128);
     const R = new Float32Array(128);
@@ -216,14 +217,7 @@ describe('process()', () => {
 
   it('outputs non-zero audio after play', async () => {
     const proc = await initProcessor();
-
-    const added = proc.port.nextMessage('track_added');
-    proc.port.deliver({
-      type: 'cmd', fn: 'engine_add_track',
-      pcmL: makePCM(44100, 0.5), pcmR: null,
-      numFrames: 44100, sampleRate: 44100, seq: 1,
-    });
-    await added;
+    await addTrackChunked(proc, makePCM(44100, 0.5), null, 1);
 
     proc.port.deliver({ type: 'cmd', fn: 'engine_play' });
 
@@ -237,14 +231,7 @@ describe('process()', () => {
 
   it('stereo: both L and R channels carry signal', async () => {
     const proc = await initProcessor();
-
-    const added = proc.port.nextMessage('track_added');
-    proc.port.deliver({
-      type: 'cmd', fn: 'engine_add_track',
-      pcmL: makePCM(44100, 0.5), pcmR: null,
-      numFrames: 44100, sampleRate: 44100, seq: 1,
-    });
-    await added;
+    await addTrackChunked(proc, makePCM(44100, 0.5), null, 1);
 
     proc.port.deliver({ type: 'cmd', fn: 'engine_play' });
 
@@ -261,17 +248,10 @@ describe('process()', () => {
 
   it('mute produces silence', async () => {
     const proc = await initProcessor();
-
-    const added = proc.port.nextMessage('track_added');
-    proc.port.deliver({
-      type: 'cmd', fn: 'engine_add_track',
-      pcmL: makePCM(44100, 0.5), pcmR: null,
-      numFrames: 44100, sampleRate: 44100, seq: 1,
-    });
-    await added;
+    const slot = await addTrackChunked(proc, makePCM(44100, 0.5), null, 1);
 
     proc.port.deliver({ type: 'cmd', fn: 'engine_play' });
-    proc.port.deliver({ type: 'cmd', fn: 'engine_set_mute', id: 0, muted: true });
+    proc.port.deliver({ type: 'cmd', fn: 'engine_set_mute', id: slot, muted: true });
 
     const L = new Float32Array(128);
     const R = new Float32Array(128);

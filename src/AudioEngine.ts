@@ -3,8 +3,13 @@
 
 import type { IWorkletPort } from './types.js';
 
-interface PendingAddTrack {
+interface PendingSlot {
   resolve: (slot: number) => void;
+  reject:  (err: Error) => void;
+}
+
+interface PendingVoid {
+  resolve: () => void;
   reject:  (err: Error) => void;
 }
 
@@ -16,9 +21,13 @@ interface PendingExport {
 export class AudioEngine {
   private port: IWorkletPort;
   private seq = 0;
-  private pending = new Map<number, PendingAddTrack>();
-  private pendingExports = new Map<number, PendingExport>();
-  private onPlayheadCb: ((position: number) => void) | null = null;
+  private pendingSlots      = new Map<number, PendingSlot>();
+  private pendingChunkLoads = new Map<number, PendingVoid>();
+  private pendingExports    = new Map<number, PendingExport>();
+  private onPlayheadCb:   ((position: number) => void) | null = null;
+  private onWasmHeapCb:   ((bytes: number) => void) | null = null;
+  private onChunkNeededCb: ((slot: number, currentChunkEnd: number, kind: 'prefetch' | 'dropout') => void) | null = null;
+  private onSeekDoneCb:    ((position: number) => void) | null = null;
   /** Set by AudioEngine.create(). Used only for test instrumentation (tap()). */
   _node: AudioWorkletNode | null = null;
 
@@ -29,6 +38,19 @@ export class AudioEngine {
 
   onPlayheadUpdate(cb: (position: number) => void): void {
     this.onPlayheadCb = cb;
+  }
+
+  /** Fires on every playhead tick with the current WASM linear-memory size in bytes. */
+  onWasmHeapUpdate(cb: (bytes: number) => void): void {
+    this.onWasmHeapCb = cb;
+  }
+
+  onChunkNeeded(cb: (slot: number, currentChunkEnd: number, kind: 'prefetch' | 'dropout') => void): void {
+    this.onChunkNeededCb = cb;
+  }
+
+  onSeekDone(cb: (position: number) => void): void {
+    this.onSeekDoneCb = cb;
   }
 
   /** Connect an AnalyserNode to tap the audio output. Dev/test use only. */
@@ -128,13 +150,25 @@ export class AudioEngine {
   // ── Message handling ────────────────────────────────────────────────────
 
   private _onMessage(data: unknown): void {
-    const msg = data as { type: string; seq?: number; id?: number };
-    if (msg.type === 'track_added' && msg.seq !== undefined) {
-      const pending = this.pending.get(msg.seq);
+    const msg = data as { type: string; seq?: number; id?: number; slot?: number };
+    if (msg.type === 'track_added_chunked' && msg.seq !== undefined) {
+      const pending = this.pendingSlots.get(msg.seq);
       if (pending) {
-        this.pending.delete(msg.seq);
-        pending.resolve(msg.id as number);
+        this.pendingSlots.delete(msg.seq);
+        pending.resolve(msg.slot as number);
       }
+    } else if (msg.type === 'chunk_loaded' && msg.seq !== undefined) {
+      const pending = this.pendingChunkLoads.get(msg.seq);
+      if (pending) {
+        this.pendingChunkLoads.delete(msg.seq);
+        pending.resolve();
+      }
+    } else if (msg.type === 'chunk_needed') {
+      const d = msg as { type: string; slot: number; currentChunkEnd: number; kind?: 'prefetch' | 'dropout' };
+      this.onChunkNeededCb?.(d.slot, d.currentChunkEnd, d.kind ?? 'prefetch');
+    } else if (msg.type === 'seek_done') {
+      const d = msg as { type: string; position: number };
+      this.onSeekDoneCb?.(d.position);
     } else if (msg.type === 'export_complete' && msg.seq !== undefined) {
       const pe = this.pendingExports.get(msg.seq);
       if (pe) {
@@ -143,7 +177,9 @@ export class AudioEngine {
         pe.resolve({ outL: d.outL, outR: d.outR });
       }
     } else if (msg.type === 'playhead') {
-      this.onPlayheadCb?.((msg as { type: string; position: number }).position);
+      const d = msg as { type: string; position: number; wasmHeapBytes?: number };
+      this.onPlayheadCb?.(d.position);
+      if (d.wasmHeapBytes !== undefined) this.onWasmHeapCb?.(d.wasmHeapBytes);
     }
   }
 
@@ -153,36 +189,52 @@ export class AudioEngine {
 
   // ── Public API ──────────────────────────────────────────────────────────
 
-  // Returns the engine slot assigned by the WASM.
-  // Slices pcmL/pcmR so the caller retains the originals for undo/redo,
-  // then transfers the slice buffers to avoid a second structured-clone copy
-  // in postMessage (which would otherwise serialize hundreds of MB on the main thread).
-  addTrack(pcmL: Float32Array, pcmR: Float32Array | null, numFrames: number, sampleRate: number): Promise<number> {
+  /**
+   * Allocate a WASM track slot for a source file of numFrames total length.
+   * No audio data is loaded yet — call loadChunk() (via ChunkCacheManager) to
+   * provide the initial chunk before playback starts.
+   */
+  addTrackChunked(numFrames: number, sampleRate: number): Promise<number> {
     const seq = this._nextSeq();
-    if (import.meta.env.DEV) performance.mark('engine:addTrack-postMessage-start');
-    const pcmLCopy = pcmL.slice();
-    const pcmRCopy = pcmR ? pcmR.slice() : null;
-    const transferList: ArrayBuffer[] = [pcmLCopy.buffer];
-    if (pcmRCopy) transferList.push(pcmRCopy.buffer);
     return new Promise<number>((resolve, reject) => {
-      this.pending.set(seq, { resolve, reject });
+      this.pendingSlots.set(seq, { resolve, reject });
+      this.port.postMessage({ type: 'cmd', fn: 'engine_add_track_chunked', seq, numFrames, sampleRate });
+    });
+  }
+
+  /**
+   * Load (or replace) the PCM chunk for `slot`.
+   * The arrays are transferred to the worklet (zero-copy); do not reuse them
+   * after calling this.  The WASM engine takes ownership and will free them.
+   */
+  loadChunk(
+    slot: number,
+    chunkL: Float32Array,
+    chunkR: Float32Array | null,
+    chunkStart: number,
+    chunkLength: number,
+  ): Promise<void> {
+    const seq      = this._nextSeq();
+    const lCopy    = chunkL.slice();
+    const rCopy    = chunkR ? chunkR.slice() : null;
+    const transfer: ArrayBuffer[] = [lCopy.buffer];
+    if (rCopy) transfer.push(rCopy.buffer);
+    return new Promise<void>((resolve, reject) => {
+      this.pendingChunkLoads.set(seq, { resolve, reject });
       this.port.postMessage({
-        type: 'cmd', fn: 'engine_add_track',
-        seq,
-        pcmL: pcmLCopy,
-        pcmR: pcmRCopy,
-        numFrames,
-        sampleRate,
-      }, transferList);
-      if (import.meta.env.DEV) {
-        performance.mark('engine:addTrack-postMessage-end');
-        performance.measure('engine:addTrack-postMessage', 'engine:addTrack-postMessage-start', 'engine:addTrack-postMessage-end');
-      }
+        type: 'cmd', fn: 'engine_load_chunk',
+        seq, slot, chunkL: lCopy, chunkR: rCopy, chunkStart, chunkLength,
+      }, transfer);
     });
   }
 
   removeTrack(slot: number): void {
     this.port.postMessage({ type: 'cmd', fn: 'engine_remove_track', id: slot });
+  }
+
+  /** Notify the worklet that a chunk load failed so it can clear its pending state. */
+  chunkLoadFailed(slot: number): void {
+    this.port.postMessage({ type: 'cmd', fn: 'engine_chunk_load_failed', id: slot });
   }
 
   setGain(slot: number, value: number): void {
@@ -213,9 +265,13 @@ export class AudioEngine {
     this.port.postMessage({ type: 'cmd', fn: 'engine_set_start_frame', id: slot, startFrame });
   }
 
-  play():                    void { this.port.postMessage({ type: 'cmd', fn: 'engine_play' }); }
-  pause():                   void { this.port.postMessage({ type: 'cmd', fn: 'engine_pause' }); }
-  seek(position: number):    void { this.port.postMessage({ type: 'cmd', fn: 'engine_seek', position }); }
+  play():  void { this.port.postMessage({ type: 'cmd', fn: 'engine_play' }); }
+  pause(): void { this.port.postMessage({ type: 'cmd', fn: 'engine_pause' }); }
+  seek(position: number): void {
+    // The worklet will post `seek_done` after resetting filter state,
+    // which triggers ChunkCacheManager to reload chunks around the new position.
+    this.port.postMessage({ type: 'cmd', fn: 'engine_seek', position });
+  }
 
   exportRender(totalFrames: number, restorePosition: number): Promise<{ outL: Float32Array; outR: Float32Array }> {
     const seq = this._nextSeq();

@@ -20,8 +20,10 @@ void track_init(Track* t, float sample_rate) {
 }
 
 void track_free(Track* t) {
-    if (t->pcm_L) { free(t->pcm_L); t->pcm_L = NULL; }
-    if (t->pcm_R) { free(t->pcm_R); t->pcm_R = NULL; }
+    if (t->chunk_L)      { free(t->chunk_L);      t->chunk_L      = NULL; }
+    if (t->chunk_R)      { free(t->chunk_R);       t->chunk_R      = NULL; }
+    if (t->next_chunk_L) { free(t->next_chunk_L);  t->next_chunk_L = NULL; }
+    if (t->next_chunk_R) { free(t->next_chunk_R);  t->next_chunk_R = NULL; }
     delay_free(&t->delay);
     t->active = 0;
 }
@@ -31,11 +33,32 @@ void track_process_frame(Track* t, long playhead,
     *out_L = 0.0f;
     *out_R = 0.0f;
 
-    long local = playhead - t->start_frame;
-    if (!t->active || !t->pcm_L || local < 0 || local >= t->num_frames) return;
+    /* src_frame: position within the source file.
+       chunk_local: position within the currently loaded chunk.
+       Output silence on cache miss (chunk not yet loaded or gap). */
+    long src_frame = playhead - t->start_frame;
 
-    float raw_L = t->pcm_L[local];
-    float raw_R = t->pcm_R ? t->pcm_R[local] : raw_L; /* mono fallback */
+    /* Seamless chunk promotion: if the prefetched next chunk is ready and
+       the playhead has reached its start, swap it in before reading audio.
+       This keeps the previous chunk alive until the boundary so there is
+       no silence gap during the handover. */
+    if (t->next_chunk_L && src_frame >= t->next_chunk_start) {
+        if (t->chunk_L) free(t->chunk_L);
+        if (t->chunk_R) free(t->chunk_R);
+        t->chunk_L      = t->next_chunk_L;
+        t->chunk_R      = t->next_chunk_R;
+        t->chunk_start  = t->next_chunk_start;
+        t->chunk_length = t->next_chunk_length;
+        t->next_chunk_L = NULL;
+        t->next_chunk_R = NULL;
+    }
+
+    long chunk_local = src_frame - t->chunk_start;
+    if (!t->active || !t->chunk_L || src_frame < 0 || src_frame >= t->num_frames
+        || chunk_local < 0 || chunk_local >= t->chunk_length) return;
+
+    float raw_L = t->chunk_L[chunk_local];
+    float raw_R = t->chunk_R ? t->chunk_R[chunk_local] : raw_L; /* mono fallback */
 
     /* Signal chain: EQ → Compressor → Distortion → Limiter → Delay → Chorus → Reverb */
     float eq_L = eq_process_sample(&t->eq, raw_L, 0);

@@ -14,6 +14,10 @@ class MixerProcessor extends AudioWorkletProcessor {
     this.exports  = null;
     this.outPtrL  = 0;
     this.outPtrR  = 0;
+    // Track metadata for chunk-depletion polling (slot → {chunkStart, chunkLength})
+    this._activeSlots = new Map();
+    // Slots that have had a chunk_needed event sent but not yet answered
+    this._pendingChunkRequests = new Set();
 
     this.port.onmessage = (e) => {
       const t = e.data ? e.data.type : '?';
@@ -70,32 +74,54 @@ class MixerProcessor extends AudioWorkletProcessor {
     const seq = cmd.seq;
 
     switch (cmd.fn) {
-      case 'engine_add_track': {
-        const { pcmL, pcmR, numFrames, sampleRate } = cmd;
-
-        const pL = e.malloc(numFrames * 4);
-        const pR = pcmR ? e.malloc(numFrames * 4) : 0;
-
-        const heap = new Float32Array(e.memory.buffer);
-        heap.set(pcmL, pL >> 2);
-        if (pcmR) heap.set(pcmR, pR >> 2);
+      case 'engine_add_track_chunked': {
+        // Allocate a track slot without loading any PCM.
+        // The caller must follow up with engine_load_chunk.
+        const { numFrames, sampleRate } = cmd;
+        const slot = e.engine_add_track_chunked(numFrames, sampleRate);
+        if (slot < 0) {
+          this.port.postMessage({ type: 'error', message: 'No free track slots (MAX_TRACKS=32)', seq });
+          break;
+        }
+        this._activeSlots.set(slot, { chunkStart: 0, chunkLength: 0 });
+        this.port.postMessage({ type: 'track_added_chunked', slot, seq });
+        break;
+      }
+      case 'engine_load_chunk': {
+        // Swap the PCM chunk for a slot. Takes ownership of chunkL/chunkR.
+        const { slot, chunkL, chunkR, chunkStart, chunkLength } = cmd;
+        const pL = e.malloc(chunkLength * 4);
+        const pR = chunkR ? e.malloc(chunkLength * 4) : 0;
 
         if (pL === 0) {
-          // malloc returned NULL — heap could not grow (OOM).
-          this.port.postMessage({ type: 'error', message: 'OOM: malloc failed for PCM buffer', seq });
+          this.port.postMessage({ type: 'error', message: 'OOM: malloc failed for chunk buffer', seq });
           if (pR) e.free(pR);
           break;
         }
 
-        const id = e.engine_add_track(pL, pR, numFrames, sampleRate);
-        // pL / pR ownership transferred to the engine.
-        // track_free() (called by engine_remove_track) will free() them.
+        const heap = new Float32Array(e.memory.buffer);
+        heap.set(chunkL, pL >> 2);
+        if (chunkR) heap.set(chunkR, pR >> 2);
 
-        // Echo seq so AudioEngine can resolve the right pending promise.
-        this.port.postMessage({ type: 'track_added', id, seq });
+        // Ownership of pL/pR transferred to C engine; engine_load_chunk frees the old chunk.
+        e.engine_load_chunk(slot, pL, pR, chunkStart, chunkLength);
+        // Update local slot metadata for depletion polling.
+        this._activeSlots.set(slot, { chunkStart, chunkLength });
+        this._pendingChunkRequests.delete(slot);
+
+        this.port.postMessage({ type: 'chunk_loaded', slot, seq, ts: Date.now() });
         break;
       }
-      case 'engine_remove_track':    e.engine_remove_track(cmd.id); break;
+      case 'engine_remove_track':
+        e.engine_remove_track(cmd.id);
+        this._activeSlots.delete(cmd.id);
+        this._pendingChunkRequests.delete(cmd.id);
+        break;
+      case 'engine_chunk_load_failed':
+        // A chunk load on the main thread failed. Clear the pending flag so
+        // the next poll cycle can retry via chunk_needed.
+        this._pendingChunkRequests.delete(cmd.id);
+        break;
       case 'engine_set_gain':        e.engine_set_gain(cmd.id, cmd.value); break;
       case 'engine_set_pan':         e.engine_set_pan(cmd.id, cmd.value); break;
       case 'engine_set_mute':        e.engine_set_mute(cmd.id, cmd.muted ? 1 : 0); break;
@@ -106,7 +132,12 @@ class MixerProcessor extends AudioWorkletProcessor {
       case 'engine_set_start_frame': e.engine_set_start_frame(cmd.id, cmd.startFrame); break;
       case 'engine_play':            e.engine_play(); break;
       case 'engine_pause':           e.engine_pause(); break;
-      case 'engine_seek':            e.engine_seek(cmd.position); break;
+      case 'engine_seek':
+        e.engine_seek(cmd.position);
+        // Clear pending chunk requests so ChunkCacheManager can reload all slots.
+        this._pendingChunkRequests.clear();
+        this.port.postMessage({ type: 'seek_done', position: cmd.position });
+        break;
       case 'engine_set_master_gain': e.engine_set_master_gain(cmd.value); break;
 
       case 'engine_export': {
@@ -173,10 +204,35 @@ class MixerProcessor extends AudioWorkletProcessor {
 
     this._pollCounter = (this._pollCounter || 0) + 1;
     if (this._pollCounter % 33 === 0) {
+      const playhead = this.exports.engine_get_playhead();
       this.port.postMessage({
         type: 'playhead',
-        position: this.exports.engine_get_playhead(),
+        position: playhead,
+        wasmHeapBytes: this.exports.memory.buffer.byteLength,
       });
+
+      // Chunk-depletion check: every ~33 quanta (~740 ms at 44.1 kHz / 128 frames)
+      // fire chunk_needed for any slot within 5 s of exhausting its loaded chunk.
+      // 5 s of lead time absorbs OPFS read + message round-trip latency.
+      const PREFETCH_FRAMES = 220500; // 5 s @ 44.1 kHz
+      if (this.exports.engine_chunk_remaining) {
+        for (const [slot, meta] of this._activeSlots) {
+          if (this._pendingChunkRequests.has(slot)) continue;
+          const remaining = this.exports.engine_chunk_remaining(slot, playhead);
+          const currentChunkEnd = meta.chunkStart + meta.chunkLength;
+          if (remaining > 0 && remaining < PREFETCH_FRAMES) {
+            // Normal prefetch: approaching end of loaded chunk.
+            this._pendingChunkRequests.add(slot);
+            this.port.postMessage({ type: 'chunk_needed', slot, currentChunkEnd, kind: 'prefetch', remaining, playhead, ts: Date.now() });
+          } else if (remaining === 0) {
+            // Recovery: chunk is already exhausted. This happens when a file longer
+            // than CHUNK_FRAMES had its prefetch delayed past the boundary.
+            // ChunkCacheManager will ignore this if we are already at end of file.
+            this._pendingChunkRequests.add(slot);
+            this.port.postMessage({ type: 'chunk_needed', slot, currentChunkEnd, kind: 'dropout', remaining: 0, playhead, ts: Date.now() });
+          }
+        }
+      }
     }
 
     return true;

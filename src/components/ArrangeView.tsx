@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import type { Session } from '../Session.js';
 import type { SessionState, RegionView, WaveformPeaks } from '../types.js';
+import { computePeaksAsync } from '../waveform.js';
 import { Ruler } from './Ruler.js';
 import { TrackLane } from './TrackLane.js';
 import { TrackHeader } from './TrackHeader.js';
@@ -58,6 +59,9 @@ export function ArrangeView({ session, state, playhead, onSeek, audioContext }: 
   stateRef.current = state;
   const tracksRef = useRef(state ? [...state.tracks.values()] : []);
   tracksRef.current = state ? [...state.tracks.values()] : [];
+  // Current playhead in frames — updated on every render without causing handleDrop to re-subscribe.
+  const playheadPosRef = useRef(playhead);
+  playheadPosRef.current = playhead;
 
   // Update playhead cursor position via ref to avoid React re-renders on every frame
   useEffect(() => {
@@ -248,15 +252,44 @@ export function ArrangeView({ session, state, playhead, onSeek, audioContext }: 
     if (!audioContext) return;
     const rect = laneAreaRef.current?.getBoundingClientRect();
     const dropX = rect ? e.clientX - rect.left : 0;
-    const startFrame = Math.max(0, Math.round(viewport.scrollX + dropX / viewport.pxPerFrame));
+    const dropFrame = Math.max(0, Math.round(viewport.scrollX + dropX / viewport.pxPerFrame));
 
+    const store = session.getStore();
     const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('audio/'));
     for (const file of files) {
-      const buf = await audioContext.decodeAudioData(await file.arrayBuffer());
+      // 1. Decode audio (produces Float32Array views into Web Audio's internal heap)
+      const buf  = await audioContext.decodeAudioData(await file.arrayBuffer());
       const pcmL = buf.getChannelData(0);
       const pcmR = buf.numberOfChannels > 1 ? buf.getChannelData(1) : null;
+
+      // 2. Compute waveform peaks before writing (peaks need the full PCM in memory)
+      const peaks = await computePeaksAsync(pcmL, pcmR, buf.length);
+
+      // 3. Persist decoded PCM to OPFS + peaks/metadata to IndexedDB
+      const fileId = crypto.randomUUID();
+      await store.store(fileId, pcmL, pcmR, {
+        fileId,
+        name:       file.name,
+        numFrames:  buf.length,
+        sampleRate: buf.sampleRate,
+        numChannels: buf.numberOfChannels,
+      });
+      // Associate peaks with fileId so undo of AddTrack can restore them from store
+      peaks.regionId = fileId; // temporary; AddTrackCommand will set the real regionId
+      await store.storePeaks(fileId, peaks);
+
+      // 4. If the file's end is already behind the current playhead it would never play
+      //    (track_process_frame returns silence when src_frame >= num_frames).
+      //    Snap it forward so the file starts at the current playhead instead.
+      const currentPlayhead = playheadPosRef.current;
+      const startFrame = (dropFrame + buf.length <= currentPlayhead)
+        ? currentPlayhead
+        : dropFrame;
+
+      // pcmL/pcmR go out of scope after this — GC-eligible; AudioBuffer can be released.
+      // The actual chunk is loaded into WASM by AddTrackCommand via ChunkCacheManager.
       await session.execute(
-        session.makeAddTrack(pcmL, pcmR, buf.length, buf.sampleRate, file.name, undefined, startFrame),
+        session.makeAddTrack(fileId, file.name, buf.length, buf.sampleRate, undefined, startFrame),
       );
     }
   }, [audioContext, session, viewport.scrollX, viewport.pxPerFrame]);

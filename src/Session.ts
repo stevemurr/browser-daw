@@ -6,15 +6,22 @@ import type { DSPPlugin, DSPParam, PluginParamState } from './plugin.js';
 export type { Command } from './plugin.js';
 import type { SessionState, TrackMirror, Region, RegionView, WaveformPeaks } from './types.js';
 import { PLUGIN_REGISTRY } from './pluginRegistry.js';
-import { computePeaks, computePeaksAsync } from './waveform.js';
+import { computePeaksAsync } from './waveform.js';
+import type { AudioFileStore } from './store/AudioFileStore.js';
+import type { ChunkCacheManager, SlotMeta } from './ChunkCacheManager.js';
 
 // Re-export Command so callers don't need to import plugin.ts directly
 import type { Command } from './plugin.js';
 
 // ── Session ───────────────────────────────────────────────────────────────────
 
+/** Maximum number of undo entries kept in memory. Oldest entries are dropped first. */
+const MAX_UNDO_DEPTH = 50;
+
 export class Session {
   private engine: AudioEngine;
+  private store: AudioFileStore;
+  private chunkManager: ChunkCacheManager;
   private undoStack: Command[] = [];
   private redoStack: Command[] = [];
   private tracks = new Map<string, TrackMirror>();
@@ -25,8 +32,10 @@ export class Session {
   private continuous: { description: string } | null = null;
   private subscribers = new Set<(s: SessionState) => void>();
 
-  constructor(engine: AudioEngine) {
+  constructor(engine: AudioEngine, store: AudioFileStore, chunkManager: ChunkCacheManager) {
     this.engine = engine;
+    this.store  = store;
+    this.chunkManager = chunkManager;
   }
 
   // ── Public state ──────────────────────────────────────────────────────────
@@ -39,11 +48,8 @@ export class Session {
       canRedo:    this.redoStack.length > 0,
       undoLabel:  this.undoStack.at(-1)?.description ?? null,
       redoLabel:  this.redoStack.at(-1)?.description ?? null,
-      arrange:    { regions: new Map([...this.regions.entries()].map(([id, r]) => {
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        const { pcmL, pcmR, ...view } = r;
-        return [id, view as RegionView];
-      })) },
+      // Region === RegionView now (no PCM fields to strip)
+      arrange:    { regions: new Map(this.regions) as Map<string, RegionView> },
     };
   }
 
@@ -67,6 +73,8 @@ export class Session {
   async execute(cmd: Command): Promise<void> {
     await cmd.execute();
     this.undoStack.push(cmd);
+    // Drop oldest entries when the stack exceeds the depth limit to bound memory use.
+    if (this.undoStack.length > MAX_UNDO_DEPTH) this.undoStack.shift();
     this.redoStack = [];
     this.notify();
   }
@@ -212,17 +220,40 @@ export class Session {
   }
 
   getEngine(): AudioEngine { return this.engine; }
+  getStore():  AudioFileStore { return this.store; }
+
+  /** Remove all tracks, clear undo/redo history, and delete all files from OPFS. */
+  async clearSession(): Promise<void> {
+    const fileIds = new Set<string>();
+    for (const region of this.regions.values()) fileIds.add(region.fileId);
+
+    for (const region of this.regions.values()) {
+      this.engine.removeTrack(region.engineSlot);
+      this.chunkManager.unregisterSlot(region.engineSlot);
+    }
+    this.regions.clear();
+    this.tracks.clear();
+    this.waveformPeaks.clear();
+    this.undoStack = [];
+    this.redoStack = [];
+
+    for (const fileId of fileIds) {
+      await this.store.delete(fileId).catch(err => console.error('[Session] clearSession delete error:', err));
+    }
+    this.notify();
+  }
 
   // ── Command factories ─────────────────────────────────────────────────────
 
   makeAddTrack(
-    pcmL: Float32Array, pcmR: Float32Array | null,
-    numFrames: number, sampleRate: number,
+    fileId: string,
     name: string,
+    numFrames: number,
+    sampleRate: number,
     stableId = crypto.randomUUID(),
     initialStartFrame = 0,
   ): Command {
-    return new AddTrackCommand(this, this.engine, pcmL, pcmR, numFrames, sampleRate, name, stableId, initialStartFrame);
+    return new AddTrackCommand(this, this.engine, this.store, this.chunkManager, fileId, name, numFrames, sampleRate, stableId, initialStartFrame);
   }
 
   makeMoveRegion(regionId: string, toStartFrame: number, toTrackId?: string): Command {
@@ -238,11 +269,11 @@ export class Session {
   makeTrimRegion(regionId: string, newTrimStart: number, newTrimEnd: number): Command {
     const region = this.regions.get(regionId);
     if (!region) throw new Error(`Unknown regionId: ${regionId}`);
-    return new TrimRegionCommand(this, this.engine, regionId, region.trimStartFrame, region.trimEndFrame, newTrimStart, newTrimEnd);
+    return new TrimRegionCommand(this, this.engine, this.chunkManager, regionId, region.trimStartFrame, region.trimEndFrame, newTrimStart, newTrimEnd);
   }
 
   makeRemoveTrack(stableId: string): Command {
-    return new RemoveTrackCommand(this, this.engine, stableId);
+    return new RemoveTrackCommand(this, this.engine, this.chunkManager, this.store, stableId);
   }
 
   makeSetGain(stableId: string, to: number): Command {
@@ -316,11 +347,12 @@ class AddTrackCommand implements Command {
   constructor(
     private session: Session,
     private engine: AudioEngine,
-    private pcmL: Float32Array,
-    private pcmR: Float32Array | null,
+    private store: AudioFileStore,
+    private chunkManager: ChunkCacheManager,
+    private fileId: string,
+    private name: string,
     private numFrames: number,
     private sampleRate: number,
-    private name: string,
     private stableId: string,
     private initialStartFrame: number,
   ) {
@@ -328,10 +360,14 @@ class AddTrackCommand implements Command {
   }
 
   async execute(): Promise<void> {
-    const slot = await this.engine.addTrack(this.pcmL, this.pcmR, this.numFrames, this.sampleRate);
+    const slot = await this.engine.addTrackChunked(this.numFrames, this.sampleRate);
+
+    // C engine start_frame = regionStartFrame - trimStartFrame.
+    // For a new (untrimmed) track, trimStartFrame = 0, so start_frame = initialStartFrame.
     if (this.initialStartFrame !== 0) {
       this.engine.setStartFrame(slot, this.initialStartFrame);
     }
+
     this.session._registerTrack(this.stableId, {
       name:    this.name,
       gain:    1.0,
@@ -346,21 +382,40 @@ class AddTrackCommand implements Command {
       startFrame:     this.initialStartFrame,
       trimStartFrame: 0,
       trimEndFrame:   this.numFrames,
+      fileId:         this.fileId,
       engineSlot:     slot,
-      pcmL:           this.pcmL,
-      pcmR:           this.pcmR,
       numFrames:      this.numFrames,
       sampleRate:     this.sampleRate,
     });
-    // Compute peaks off the critical path: the track appears immediately and the
-    // waveform fills in once peaks are ready, keeping the main thread free.
+
+    // Load initial chunk into WASM. Must complete before callers can use playback.
+    const slotMeta: SlotMeta = {
+      fileId:         this.fileId,
+      trimStartFrame: 0,
+      trimEndFrame:   this.numFrames,
+      numFrames:      this.numFrames,
+      regionStartFrame: this.initialStartFrame,
+    };
+    await this.chunkManager.registerSlot(slot, slotMeta);
+
+    // Load waveform peaks: try store first, compute from initial chunk if missing.
     const regionId = this.regionId;
     const session  = this.session;
-    computePeaksAsync(this.pcmL, this.pcmR, this.numFrames).then(peaks => {
-      if (!session._getRegion(regionId)) return; // undo was called before peaks finished
-      peaks.regionId = regionId;
-      session._registerWaveformPeaks(peaks);
-      session._triggerNotify();
+    this.store.loadPeaks(this.fileId).then(async peaks => {
+      if (!session._getRegion(regionId)) return;
+      if (peaks) {
+        peaks.regionId = regionId;
+        session._registerWaveformPeaks(peaks);
+        session._triggerNotify();
+      } else {
+        // Peaks not in store yet — compute from the initial chunk we just loaded.
+        const { chunkL, chunkR } = await this.store.loadChunk(this.fileId, 0, this.numFrames);
+        if (!session._getRegion(regionId)) return;
+        const computed = await computePeaksAsync(chunkL, chunkR, chunkL.length);
+        computed.regionId = regionId;
+        session._registerWaveformPeaks(computed);
+        session._triggerNotify();
+      }
     });
   }
 
@@ -368,6 +423,7 @@ class AddTrackCommand implements Command {
     const region = this.session._getRegion(this.regionId);
     if (!region) throw new Error(`Unknown regionId: ${this.regionId}`);
     this.engine.removeTrack(region.engineSlot);
+    this.chunkManager.unregisterSlot(region.engineSlot);
     this.session._unregisterRegion(this.regionId);
     this.session._unregisterWaveformPeaks(this.regionId);
     this.session._unregisterTrack(this.stableId);
@@ -377,25 +433,29 @@ class AddTrackCommand implements Command {
 class RemoveTrackCommand implements Command {
   readonly description = 'Remove Track';
   private trackSnapshot: TrackMirror;
+  /** Lightweight snapshots — no PCM arrays, just geometry + fileId. */
   private regionSnapshots: Region[];
 
   constructor(
     private session: Session,
     private engine: AudioEngine,
+    private chunkManager: ChunkCacheManager,
+    private store: AudioFileStore,
     private stableId: string,
   ) {
     this.trackSnapshot = session.snapshotTrack(stableId);
-    // Shallow-copy each region (PCM arrays are references to immutable typed arrays)
     this.regionSnapshots = session.regionsForTrack(stableId).map(r => ({ ...r }));
   }
 
   async execute(): Promise<void> {
     for (const region of this.regionSnapshots) {
       this.engine.removeTrack(region.engineSlot);
+      this.chunkManager.unregisterSlot(region.engineSlot);
       this.session._unregisterRegion(region.regionId);
       this.session._unregisterWaveformPeaks(region.regionId);
     }
     this.session._unregisterTrack(this.stableId);
+    // NOTE: the file in OPFS is NOT deleted here — undo needs it.
   }
 
   async undo(): Promise<void> {
@@ -409,20 +469,31 @@ class RemoveTrackCommand implements Command {
     });
 
     for (const regionSnap of this.regionSnapshots) {
-      const newSlot = await this.engine.addTrack(
-        regionSnap.pcmL, regionSnap.pcmR,
-        regionSnap.numFrames, regionSnap.sampleRate,
-      );
-      this.engine.setStartFrame(newSlot, regionSnap.startFrame);
+      const newSlot = await this.engine.addTrackChunked(regionSnap.numFrames, regionSnap.sampleRate);
+      // C engine start_frame = regionStartFrame - trimStartFrame
+      this.engine.setStartFrame(newSlot, regionSnap.startFrame - regionSnap.trimStartFrame);
       this.session._applyTrackSettings(this.trackSnapshot, newSlot);
       this.session._registerRegion({ ...regionSnap, engineSlot: newSlot });
+
+      const slotMeta: SlotMeta = {
+        fileId:           regionSnap.fileId,
+        trimStartFrame:   regionSnap.trimStartFrame,
+        trimEndFrame:     regionSnap.trimEndFrame,
+        numFrames:        regionSnap.numFrames,
+        regionStartFrame: regionSnap.startFrame,
+      };
+      await this.chunkManager.registerSlot(newSlot, slotMeta);
+
+      // Restore waveform peaks from store
       const regionId = regionSnap.regionId;
       const session  = this.session;
-      computePeaksAsync(regionSnap.pcmL, regionSnap.pcmR, regionSnap.numFrames).then(peaks => {
+      this.store.loadPeaks(regionSnap.fileId).then(peaks => {
         if (!session._getRegion(regionId)) return;
-        peaks.regionId = regionId;
-        session._registerWaveformPeaks(peaks);
-        session._triggerNotify();
+        if (peaks) {
+          peaks.regionId = regionId;
+          session._registerWaveformPeaks(peaks);
+          session._triggerNotify();
+        }
       });
     }
   }
@@ -474,12 +545,12 @@ class MoveRegionCommand implements Command {
 
 class TrimRegionCommand implements Command {
   readonly description = 'Trim Region';
-  private regionSnapshot: Region;
   private trackSnapshot: TrackMirror;
 
   constructor(
     private session: Session,
     private engine: AudioEngine,
+    private chunkManager: ChunkCacheManager,
     private regionId: string,
     private oldTrimStart: number,
     private oldTrimEnd: number,
@@ -488,7 +559,6 @@ class TrimRegionCommand implements Command {
   ) {
     const region = session._getRegion(regionId);
     if (!region) throw new Error(`Unknown regionId: ${regionId}`);
-    this.regionSnapshot = { ...region }; // PCM arrays are immutable references
     this.trackSnapshot = session.snapshotTrack(region.trackId);
   }
 
@@ -501,28 +571,27 @@ class TrimRegionCommand implements Command {
   }
 
   private async _applyTrim(trimStart: number, trimEnd: number): Promise<void> {
-    // Always read the CURRENT live region for the slot (it changes after each trim)
+    // The slot stays constant across trim operations — no remove/re-add needed.
     const liveRegion = this.session._getRegion(this.regionId);
     if (!liveRegion) throw new Error(`Unknown regionId: ${this.regionId}`);
 
-    // Original PCM is always on regionSnapshot (never mutated)
-    const { pcmL, pcmR, sampleRate } = this.regionSnapshot;
-    const slicedL = pcmL.subarray(trimStart, trimEnd);
-    const slicedR = pcmR ? pcmR.subarray(trimStart, trimEnd) : null;
-    const trimmedFrames = trimEnd - trimStart;
+    // Adjust C engine start_frame to account for new trim offset.
+    // Invariant: start_frame = regionStartFrame - trimStartFrame
+    const newEngineStartFrame = liveRegion.startFrame - trimStart;
+    this.engine.setStartFrame(liveRegion.engineSlot, newEngineStartFrame);
 
-    this.engine.removeTrack(liveRegion.engineSlot);
-    const newSlot = await this.engine.addTrack(slicedL, slicedR, trimmedFrames, sampleRate);
-    this.engine.setStartFrame(newSlot, liveRegion.startFrame);
-    this.session._applyTrackSettings(this.trackSnapshot, newSlot);
+    // Load the chunk covering the new trim start from OPFS.
+    await this.chunkManager.handleTrimChange(
+      liveRegion.engineSlot, trimStart, trimEnd, liveRegion.startFrame,
+    );
 
     this.session._updateRegion(this.regionId, {
-      engineSlot:     newSlot,
       trimStartFrame: trimStart,
       trimEndFrame:   trimEnd,
     });
   }
 }
+
 
 class SetGainCommand implements Command {
   readonly description = 'Set Gain';

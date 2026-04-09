@@ -10,7 +10,6 @@ interface Props {
 
 // ── Canvas geometry ───────────────────────────────────────────────────────────
 
-const CW = 260;  // CSS pixels
 const CH = 160;
 const PAD = { t: 10, r: 10, b: 22, l: 28 };
 
@@ -19,12 +18,12 @@ const F_MAX = 20000;
 const DB_MAX = 18;
 const SAMPLE_RATE = 44100;
 
-function freqToX(f: number): number {
-  const w = CW - PAD.l - PAD.r;
+function freqToX(f: number, cw: number): number {
+  const w = cw - PAD.l - PAD.r;
   return PAD.l + w * Math.log(f / F_MIN) / Math.log(F_MAX / F_MIN);
 }
-function xToFreq(x: number): number {
-  const w = CW - PAD.l - PAD.r;
+function xToFreq(x: number, cw: number): number {
+  const w = cw - PAD.l - PAD.r;
   return F_MIN * Math.pow(F_MAX / F_MIN, (x - PAD.l) / w);
 }
 function gainToY(db: number): number {
@@ -104,7 +103,9 @@ export function EQPanel({ session, track }: Props) {
   const [local, setLocal]       = useState<Record<string, number>>(() => ({ ...eq }));
   const [activeNode, setActiveNode] = useState<number | null>(null);
 
-  const canvasRef   = useRef<HTMLCanvasElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Tracks actual rendered canvas CSS width so mouse handlers stay in sync with draw
+  const cwRef = useRef<number>(260);
 
   // Drag ref holds mutable current values so the window mouseup handler can commit
   // without stale closures.
@@ -145,17 +146,19 @@ export function EQPanel({ session, track }: Props) {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    const cw = canvas.clientWidth || 260;
+    cwRef.current = cw;
     const dpr = window.devicePixelRatio || 1;
-    canvas.width  = Math.round(CW * dpr);
+    canvas.width  = Math.round(cw * dpr);
     canvas.height = Math.round(CH * dpr);
     const ctx = canvas.getContext('2d')!;
     ctx.scale(dpr, dpr);
 
     // Background
     ctx.fillStyle = '#0e0e16';
-    ctx.fillRect(0, 0, CW, CH);
+    ctx.fillRect(0, 0, cw, CH);
 
-    const plotL = PAD.l, plotR = CW - PAD.r;
+    const plotL = PAD.l, plotR = cw - PAD.r;
     const plotT = PAD.t, plotB = CH - PAD.b;
 
     // Grid — horizontal dB lines
@@ -167,7 +170,7 @@ export function EQPanel({ session, track }: Props) {
     }
     // Grid — frequency verticals
     for (const f of [50, 100, 200, 500, 1000, 2000, 5000, 10000]) {
-      const x = freqToX(f);
+      const x = freqToX(f, cw);
       ctx.beginPath(); ctx.moveTo(x, plotT); ctx.lineTo(x, plotB); ctx.stroke();
     }
 
@@ -186,14 +189,14 @@ export function EQPanel({ session, track }: Props) {
     ctx.fillText('-18', plotL - 3, plotB + 4);
     ctx.textAlign = 'center';
     for (const [f, lbl] of [[100, '100'], [1000, '1k'], [10000, '10k']] as const) {
-      ctx.fillText(lbl, freqToX(f), plotB + 14);
+      ctx.fillText(lbl, freqToX(f, cw), plotB + 14);
     }
 
     // Compute combined curve
     const plotW = plotR - plotL;
     const curveY: number[] = [];
     for (let px = 0; px < plotW; px++) {
-      const f = xToFreq(plotL + px);
+      const f = xToFreq(plotL + px, cw);
       let db = 0;
       for (const band of BANDS) {
         db += biquadDb(band.type, get(band.freqId), get(band.gainId), get(band.qId), f);
@@ -227,7 +230,7 @@ export function EQPanel({ session, track }: Props) {
     // Nodes
     for (let i = 0; i < BANDS.length; i++) {
       const band = BANDS[i];
-      const nx = freqToX(get(band.freqId));
+      const nx = freqToX(get(band.freqId), cw);
       const ny = gainToY(get(band.gainId));
 
       if (i === activeNode) {
@@ -254,22 +257,36 @@ export function EQPanel({ session, track }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [local, activeNode, eqEnabled]);
 
+  // Redraw whenever the canvas element is resized (e.g. overlay opens, window resizes)
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      // Trigger redraw by forcing a re-render; the draw effect reads clientWidth
+      setLocal(prev => ({ ...prev }));
+    });
+    ro.observe(canvas);
+    return () => ro.disconnect();
+  }, []);
+
   // ── Drag interaction ─────────────────────────────────────────────────────────
 
   // Convert a mouse event's position relative to the canvas CSS rect → canvas coords
   function canvasCoords(e: MouseEvent | React.MouseEvent): { ox: number; oy: number } {
     const rect = canvasRef.current!.getBoundingClientRect();
+    const cw = cwRef.current;
     return {
-      ox: (e.clientX - rect.left) * (CW / rect.width),
+      ox: (e.clientX - rect.left) * (cw / rect.width),
       oy: (e.clientY - rect.top)  * (CH / rect.height),
     };
   }
 
   const handleMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const { ox, oy } = canvasCoords(e);
+    const cw = cwRef.current;
     for (let i = 0; i < BANDS.length; i++) {
       const band = BANDS[i];
-      const nx = freqToX(local[band.freqId] ?? 0);
+      const nx = freqToX(local[band.freqId] ?? 0, cw);
       const ny = gainToY(local[band.gainId] ?? 0);
       if (Math.hypot(ox - nx, oy - ny) <= NODE_HIT) {
         e.preventDefault();
@@ -292,7 +309,7 @@ export function EQPanel({ session, track }: Props) {
       if (!drag) return;
       const band = BANDS[drag.band];
       const { ox, oy } = canvasCoords(e);
-      const newFreq = Math.max(band.freqMin, Math.min(band.freqMax, xToFreq(ox)));
+      const newFreq = Math.max(band.freqMin, Math.min(band.freqMax, xToFreq(ox, cwRef.current)));
       const newGain = Math.max(-DB_MAX, Math.min(DB_MAX, yToGain(oy)));
       drag.currentFreq = newFreq;
       drag.currentGain = newGain;
@@ -362,7 +379,7 @@ export function EQPanel({ session, track }: Props) {
       <canvas
         ref={canvasRef}
         className="eq-canvas"
-        style={{ width: CW, height: CH }}
+        style={{ width: '100%', height: CH }}
         onMouseDown={handleMouseDown}
         onWheel={handleWheel}
       />

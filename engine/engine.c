@@ -36,28 +36,95 @@ static int any_solo_active(void) {
 }
 
 /* ---- Track lifecycle ---- */
-int engine_add_track(float* pcm_L, float* pcm_R,
-                     long num_frames, float sample_rate) {
+
+/* Allocate a track slot for a source file of num_frames total length.
+   No PCM is loaded yet — call engine_load_chunk() to provide the initial chunk.
+   Returns the slot id (0-31) or -1 if no slots are free. */
+int engine_add_track_chunked(long num_frames, float sample_rate) {
     ensure_init();
     g_sample_rate = sample_rate;
 
     for (int i = 0; i < MAX_TRACKS; i++) {
         if (!g_tracks[i].active) {
             track_init(&g_tracks[i], sample_rate);
-
-            /* Take ownership of the caller-allocated PCM buffers.
-               The worklet allocates them with malloc(); track_free() will free()
-               them.  This avoids a second malloc+memcpy and halves peak memory
-               during loading (one copy in the heap, not two). */
-            g_tracks[i].pcm_L = pcm_L;
-            g_tracks[i].pcm_R = pcm_R; /* NULL for mono — track.c handles fallback */
-
-            g_tracks[i].num_frames = num_frames;
-            g_tracks[i].active     = 1;
+            g_tracks[i].num_frames   = num_frames;
+            g_tracks[i].chunk_L     = NULL;
+            g_tracks[i].chunk_R     = NULL;
+            g_tracks[i].chunk_start  = 0;
+            g_tracks[i].chunk_length = 0;
+            g_tracks[i].active       = 1;
             return i;
         }
     }
     return -1; /* no free slots */
+}
+
+/* Load (or replace) the PCM chunk for slot `id`.
+   Takes ownership of chunk_L and chunk_R — they must have been malloc'd by the
+   caller (the worklet).
+   chunk_start is the source-file frame offset of chunk[0].
+   chunk_length is the number of frames in this chunk.
+
+   Double-buffer semantics:
+   • If chunk_start ≤ current src_frame the chunk covers the current playhead
+     and is installed immediately (seek / initial load).  Any queued next_chunk
+     is discarded since we are jumping to a new position.
+   • If chunk_start > current src_frame the chunk is a prefetch for the future.
+     It is stored in next_chunk_* and promoted to the active chunk by
+     track_process_frame() the moment the playhead reaches next_chunk_start.
+     The old chunk continues to provide audio until promotion so there is no
+     silence at chunk boundaries. */
+void engine_load_chunk(int id, float* chunk_L, float* chunk_R,
+                       long chunk_start, long chunk_length) {
+    if (id < 0 || id >= MAX_TRACKS || !g_tracks[id].active) {
+        /* Slot invalid — free the buffers so the caller doesn't leak them. */
+        if (chunk_L) free(chunk_L);
+        if (chunk_R) free(chunk_R);
+        return;
+    }
+    Track* t = &g_tracks[id];
+    long src_frame = g_playhead - t->start_frame;
+
+    if (chunk_start <= src_frame) {
+        /* Chunk covers current playhead — install immediately (seek / reload). */
+        if (t->next_chunk_L) { free(t->next_chunk_L); t->next_chunk_L = NULL; }
+        if (t->next_chunk_R) { free(t->next_chunk_R); t->next_chunk_R = NULL; }
+        if (t->chunk_L) free(t->chunk_L);
+        if (t->chunk_R) free(t->chunk_R);
+        t->chunk_L      = chunk_L;
+        t->chunk_R      = chunk_R;
+        t->chunk_start  = chunk_start;
+        t->chunk_length = chunk_length;
+    } else {
+        /* Future chunk — queue for seamless handover. */
+        if (t->next_chunk_L) free(t->next_chunk_L);
+        if (t->next_chunk_R) free(t->next_chunk_R);
+        t->next_chunk_L      = chunk_L;
+        t->next_chunk_R      = chunk_R;
+        t->next_chunk_start  = chunk_start;
+        t->next_chunk_length = chunk_length;
+    }
+}
+
+/* Returns the number of source-file frames remaining before the furthest
+   buffered chunk boundary (next_chunk if queued, otherwise current chunk).
+   Reporting against next_chunk prevents the worklet from firing a redundant
+   chunk_needed while a prefetch is already queued in the double buffer.
+   Returns 0 if the slot is inactive or has no chunk loaded. */
+long engine_chunk_remaining(int id, long playhead) {
+    if (id < 0 || id >= MAX_TRACKS || !g_tracks[id].active || !g_tracks[id].chunk_L)
+        return 0;
+    Track* t = &g_tracks[id];
+    long src_frame = playhead - t->start_frame;
+    /* Report against next_chunk end if one is queued. */
+    if (t->next_chunk_L) {
+        long next_end = t->next_chunk_start + t->next_chunk_length;
+        long remaining = next_end - src_frame;
+        return remaining > 0 ? remaining : 0;
+    }
+    long chunk_end = t->chunk_start + t->chunk_length;
+    long remaining = chunk_end - src_frame;
+    return remaining > 0 ? remaining : 0;
 }
 
 void engine_remove_track(int id) {

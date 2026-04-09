@@ -4,7 +4,9 @@
 set -e
 
 EXPORTED_FUNCTIONS='[
-  "_engine_add_track",
+  "_engine_add_track_chunked",
+  "_engine_load_chunk",
+  "_engine_chunk_remaining",
   "_engine_remove_track",
   "_engine_get_track_count",
   "_engine_set_gain",

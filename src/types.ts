@@ -6,23 +6,20 @@ export interface Region {
   regionId: string;       // UUID, permanent
   trackId: string;        // stableId of owning track (can change on cross-track move)
   startFrame: number;     // global timeline position (offset from session start)
-  trimStartFrame: number; // sample offset into source PCM (default 0)
-  trimEndFrame: number;   // exclusive end in source PCM (default numFrames)
-  // Audio data owned by the region (moves with it across tracks)
+  trimStartFrame: number; // source-file frame offset where this region begins
+  trimEndFrame: number;   // exclusive source-file frame end (default numFrames)
+  // Audio identity — PCM lives in OPFS keyed by fileId; engine slot owns a window
+  fileId: string;         // OPFS key for the source audio
   engineSlot: number;     // volatile (0-31), C-engine slot
-  pcmL: Float32Array;     // original full-length source PCM (not trimmed)
-  pcmR: Float32Array | null;
-  numFrames: number;      // full source length before any trim
+  numFrames: number;      // full source file length (before any trim)
   sampleRate: number;
 }
 
 /**
- * View-model for React components — Region minus the large PCM buffers.
- * Passing Float32Arrays through React props causes React DevTools to serialize
- * all elements (O(numFrames) object allocations), triggering GC pauses of 1–2 s
- * on cross-track drags.  Components only need geometry; Session retains PCM internally.
+ * Type alias kept for backward-compatibility with component imports.
+ * Region no longer carries large PCM buffers, so there is nothing to strip.
  */
-export type RegionView = Omit<Region, 'pcmL' | 'pcmR'>;
+export type RegionView = Region;
 
 export interface WaveformPeaks {
   regionId: string;

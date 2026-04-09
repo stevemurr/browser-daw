@@ -38,7 +38,10 @@ export function Transport({ session, state, isPlaying, playhead, onPlay, onPause
   return (
     <div className="transport">
       <button className="btn-transport-play" onClick={isPlaying ? onPause : onPlay}>
-        {isPlaying ? '⏸' : '▶'}
+        <span className="transport-play-icon">
+          <span style={{ visibility: isPlaying ? 'hidden' : 'visible' }}>▶</span>
+          <span style={{ visibility: isPlaying ? 'visible' : 'hidden' }}>⏸</span>
+        </span>
       </button>
 
       <span className="time">{mm}:{ss}</span>

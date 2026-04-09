@@ -1,10 +1,13 @@
 import { useState, useCallback, useRef } from 'react';
 import { AudioEngine } from './AudioEngine.js';
 import { Session } from './Session.js';
+import { OPFSAudioFileStore } from './store/AudioFileStore.js';
+import { ChunkCacheManager } from './ChunkCacheManager.js';
 import type { SessionState } from './types.js';
 import { Transport } from './components/Transport.js';
 import { ArrangeView } from './components/ArrangeView.js';
 import { useKeyboard } from './hooks/useKeyboard.js';
+import { MemoryPanel } from './components/MemoryPanel.js';
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -13,6 +16,9 @@ export default function App() {
   const [playhead, setPlayhead] = useState(0);
   const [initError, setInitError] = useState<string | null>(null);
   const ctxRef = useRef<AudioContext | null>(null);
+  const engineRef = useRef<AudioEngine | null>(null);
+  const chunksRef = useRef<ChunkCacheManager | null>(null);
+  const storeRef  = useRef<OPFSAudioFileStore | null>(null);
   // Stable ref so keyboard handlers always have the latest values without re-subscribing
   const isPlayingRef = useRef(isPlaying);
   isPlayingRef.current = isPlaying;
@@ -26,7 +32,12 @@ export default function App() {
     ctxRef.current = ctx;
     const engine = await AudioEngine.create(ctx, '/audio_engine.wasm', '/worklet.js');
     engine.onPlayheadUpdate(setPlayhead);
-    const s = new Session(engine);
+    const store   = new OPFSAudioFileStore();
+    const chunks  = new ChunkCacheManager(engine, store);
+    engineRef.current = engine;
+    chunksRef.current = chunks;
+    storeRef.current  = store;
+    const s = new Session(engine, store, chunks);
     s.subscribe(setState);
     setState(s.getState());
     setSession(s);
@@ -45,9 +56,20 @@ export default function App() {
         engine,
         ctx,
         analyser,
-        injectTrack(pcm: number[], sampleRate: number, name: string): Promise<void> {
-          const pcmL = new Float32Array(pcm);
-          return s.execute(s.makeAddTrack(pcmL, null, pcmL.length, sampleRate, name));
+        chunks,
+        /** Print chunk streaming event log to the console (call after reproducing an issue). */
+        chunkLog() { chunks.printLog(); },
+        /** Clear the chunk streaming event log. */
+        chunkClear() { chunks.clearLog(); },
+        /** Return current slot metadata snapshot (pending state, trim bounds, etc.). */
+        chunkState() { return chunks.getSlotState(); },
+        /** Return the raw event array for custom filtering/analysis. */
+        chunkEvents() { return chunks.getEventLog(); },
+        async injectTrack(pcm: number[], sampleRate: number, name: string): Promise<void> {
+          const pcmL   = new Float32Array(pcm);
+          const fileId = crypto.randomUUID();
+          await s.getStore().store(fileId, pcmL, null, { fileId, name, numFrames: pcmL.length, sampleRate, numChannels: 1 });
+          return s.execute(s.makeAddTrack(fileId, name, pcmL.length, sampleRate));
         },
         captureRMS(durationMs: number): Promise<number> {
           return new Promise(resolve => setTimeout(() => {
@@ -136,6 +158,13 @@ export default function App() {
             onSeek={handleSeek}
             audioContext={ctxRef.current}
           />
+          {import.meta.env.DEV && engineRef.current && chunksRef.current && storeRef.current && (
+            <MemoryPanel
+              engine={engineRef.current}
+              chunks={chunksRef.current}
+              store={storeRef.current}
+            />
+          )}
         </>
       )}
     </div>

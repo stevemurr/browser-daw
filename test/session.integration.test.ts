@@ -1,30 +1,81 @@
 // Session → AudioEngine → SimulatedWorklet → real WASM integration tests.
 // Tests run headless in Node; no browser or AudioContext needed.
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { SimulatedWorklet } from './harness/SimulatedWorklet.js';
 import { AudioEngine } from '../src/AudioEngine.js';
 import { Session } from '../src/Session.js';
+import { ChunkCacheManager } from '../src/ChunkCacheManager.js';
+import type { AudioFileStore, AudioFileMeta } from '../src/store/AudioFileStore.js';
+import type { WaveformPeaks } from '../src/types.js';
 import { EQPlugin } from '../src/plugins/eq.plugin.js';
 
-// Helpers ─────────────────────────────────────────────────────────────────────
+// ── MockAudioFileStore ────────────────────────────────────────────────────────
+// In-memory store for Node test environment (no OPFS / IndexedDB available).
 
-function silentPCM(frames: number): Float32Array {
-  return new Float32Array(frames);
+class MockAudioFileStore implements AudioFileStore {
+  private pcm   = new Map<string, { L: Float32Array; R: Float32Array | null }>();
+  private meta  = new Map<string, AudioFileMeta>();
+  private peaks = new Map<string, WaveformPeaks>();
+
+  async store(fileId: string, L: Float32Array, R: Float32Array | null, m: AudioFileMeta): Promise<void> {
+    this.pcm.set(fileId, { L, R });
+    this.meta.set(fileId, m);
+  }
+
+  async loadChunk(fileId: string, startFrame: number, length: number): Promise<{ chunkL: Float32Array; chunkR: Float32Array | null }> {
+    const data = this.pcm.get(fileId);
+    if (!data) return { chunkL: new Float32Array(length), chunkR: null };
+    const end   = Math.min(startFrame + length, data.L.length);
+    const chunkL = data.L.slice(startFrame, end);
+    const chunkR = data.R ? data.R.slice(startFrame, end) : null;
+    // Pad to requested length if file is shorter
+    if (chunkL.length < length) {
+      const padded = new Float32Array(length); padded.set(chunkL); return { chunkL: padded, chunkR };
+    }
+    return { chunkL, chunkR };
+  }
+
+  async storePeaks(fileId: string, p: WaveformPeaks): Promise<void> { this.peaks.set(fileId, p); }
+  async loadPeaks(fileId: string): Promise<WaveformPeaks | null>    { return this.peaks.get(fileId) ?? null; }
+  async delete(fileId: string): Promise<void> { this.pcm.delete(fileId); this.meta.delete(fileId); this.peaks.delete(fileId); }
+  async listFiles(): Promise<AudioFileMeta[]> { return [...this.meta.values()]; }
 }
 
-function tonePCM(frames: number, value = 0.5): Float32Array {
-  return new Float32Array(frames).fill(value);
-}
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-async function makeSession(): Promise<{ session: Session; worklet: SimulatedWorklet }> {
+function silentPCM(frames: number): Float32Array { return new Float32Array(frames); }
+function tonePCM(frames: number, value = 0.5): Float32Array { return new Float32Array(frames).fill(value); }
+
+async function makeSession(): Promise<{ session: Session; worklet: SimulatedWorklet; store: MockAudioFileStore }> {
   const worklet = new SimulatedWorklet();
   await worklet.ready_();
-  const engine = new AudioEngine(worklet);
+  const engine  = new AudioEngine(worklet);
   worklet.postMessage({ type: 'init' });
   await new Promise<void>((r) => setTimeout(r, 10));
-  const session = new Session(engine);
-  return { session, worklet };
+  const store   = new MockAudioFileStore();
+  const chunks  = new ChunkCacheManager(engine, store);
+  const session = new Session(engine, store, chunks);
+  return { session, worklet, store };
+}
+
+/**
+ * Convenience helper: store PCM in the mock store then execute AddTrack.
+ * Mirrors what ArrangeView.handleDrop does in production.
+ */
+async function addTrack(
+  session: Session,
+  store: MockAudioFileStore,
+  pcmL: Float32Array,
+  pcmR: Float32Array | null,
+  name: string,
+  startFrame?: number,
+): Promise<void> {
+  const fileId = crypto.randomUUID();
+  await store.store(fileId, pcmL, pcmR, {
+    fileId, name, numFrames: pcmL.length, sampleRate: 44100, numChannels: pcmR ? 2 : 1,
+  });
+  await session.execute(session.makeAddTrack(fileId, name, pcmL.length, 44100, undefined, startFrame));
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -33,10 +84,9 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
 
   describe('AddTrack', () => {
     it('adds a track and registers it in the mirror', async () => {
-      const { session } = await makeSession();
+      const { session, store } = await makeSession();
 
-      const pcmL = tonePCM(1024);
-      await session.execute(session.makeAddTrack(pcmL, null, 1024, 44100, 'Track 1'));
+      await addTrack(session, store, tonePCM(1024), null, 'Track 1');
 
       const state = session.getState();
       expect(state.tracks.size).toBe(1);
@@ -50,8 +100,8 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('initialises plugin state with defaults for all registered plugins', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(silentPCM(256), null, 256, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, silentPCM(256), null, 'T');
 
       const track = [...session.getState().tracks.values()][0];
       expect(track.plugins).toBeDefined();
@@ -62,20 +112,25 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('assigns distinct engine slots to two tracks', async () => {
-      const { session } = await makeSession();
+      const { session, store } = await makeSession();
 
-      await session.execute(session.makeAddTrack(tonePCM(512), null, 512, 44100, 'A'));
-      await session.execute(session.makeAddTrack(tonePCM(512), null, 512, 44100, 'B'));
+      await addTrack(session, store, tonePCM(512), null, 'A');
+      await addTrack(session, store, tonePCM(512), null, 'B');
 
       const slots = [...session.getState().arrange.regions.values()].map((r) => r.engineSlot);
       expect(slots[0]).not.toBe(slots[1]);
     });
 
     it('seq correlation: concurrent addTrack calls resolve to correct slots', async () => {
-      const { session } = await makeSession();
+      const { session, store } = await makeSession();
 
-      const p1 = session.execute(session.makeAddTrack(tonePCM(256), null, 256, 44100, 'X'));
-      const p2 = session.execute(session.makeAddTrack(tonePCM(256), null, 256, 44100, 'Y'));
+      // Pre-store both PCMs so concurrent makeAddTrack calls have their data ready
+      const fid1 = crypto.randomUUID();
+      const fid2 = crypto.randomUUID();
+      await store.store(fid1, tonePCM(256), null, { fileId: fid1, name: 'X', numFrames: 256, sampleRate: 44100, numChannels: 1 });
+      await store.store(fid2, tonePCM(256), null, { fileId: fid2, name: 'Y', numFrames: 256, sampleRate: 44100, numChannels: 1 });
+      const p1 = session.execute(session.makeAddTrack(fid1, 'X', 256, 44100));
+      const p2 = session.execute(session.makeAddTrack(fid2, 'Y', 256, 44100));
       await Promise.all([p1, p2]);
 
       const tracks = [...session.getState().tracks.values()];
@@ -90,15 +145,15 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
 
   describe('Undo / Redo', () => {
     it('canUndo is false initially, true after execute', async () => {
-      const { session } = await makeSession();
+      const { session, store } = await makeSession();
       expect(session.getState().canUndo).toBe(false);
-      await session.execute(session.makeAddTrack(silentPCM(256), null, 256, 44100, 'T'));
+      await addTrack(session, store, silentPCM(256), null, 'T');
       expect(session.getState().canUndo).toBe(true);
     });
 
     it('undo AddTrack removes track from mirror', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(silentPCM(256), null, 256, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, silentPCM(256), null, 'T');
       expect(session.getState().tracks.size).toBe(1);
 
       await session.undo();
@@ -108,8 +163,8 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('redo AddTrack re-adds track with same stableId', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(silentPCM(256), null, 256, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, silentPCM(256), null, 'T');
 
       const stableIdBefore = [...session.getState().tracks.keys()][0];
 
@@ -121,18 +176,18 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('execute after undo clears redo stack', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(silentPCM(256), null, 256, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, silentPCM(256), null, 'T');
       await session.undo();
       expect(session.getState().canRedo).toBe(true);
 
-      await session.execute(session.makeAddTrack(silentPCM(256), null, 256, 44100, 'U'));
+      await addTrack(session, store, silentPCM(256), null, 'U');
       expect(session.getState().canRedo).toBe(false);
     });
 
     it('undo/redo SetGain restores correct value in mirror', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(silentPCM(256), null, 256, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, silentPCM(256), null, 'T');
       const id = [...session.getState().tracks.keys()][0];
 
       await session.execute(session.makeSetGain(id, 1.5));
@@ -146,8 +201,8 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('undo SetGain reverts label', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(silentPCM(256), null, 256, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, silentPCM(256), null, 'T');
       const id = [...session.getState().tracks.keys()][0];
       await session.execute(session.makeSetGain(id, 1.8));
 
@@ -157,8 +212,8 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('undo RemoveTrack re-adds track and restores params', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(tonePCM(512), null, 512, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, tonePCM(512), null, 'T');
       const id = [...session.getState().tracks.keys()][0];
 
       await session.execute(session.makeSetGain(id, 1.7));
@@ -177,8 +232,8 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
 
   describe('Plugin param commands (EQ)', () => {
     it('makeSetPluginParam updates mirror value', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(silentPCM(256), null, 256, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, silentPCM(256), null, 'T');
       const id = [...session.getState().tracks.keys()][0];
 
       await session.execute(session.makeSetPluginParam(id, EQPlugin, 'band0_gain', 6.0));
@@ -187,8 +242,8 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('undo SetPluginParam restores previous value', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(silentPCM(256), null, 256, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, silentPCM(256), null, 'T');
       const id = [...session.getState().tracks.keys()][0];
 
       await session.execute(session.makeSetPluginParam(id, EQPlugin, 'band0_gain', 6.0));
@@ -198,8 +253,8 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('redo SetPluginParam re-applies value', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(silentPCM(256), null, 256, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, silentPCM(256), null, 'T');
       const id = [...session.getState().tracks.keys()][0];
 
       await session.execute(session.makeSetPluginParam(id, EQPlugin, 'band1_freq', 2000));
@@ -210,8 +265,8 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('SetPluginParam command description includes plugin and param label', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(silentPCM(256), null, 256, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, silentPCM(256), null, 'T');
       const id = [...session.getState().tracks.keys()][0];
 
       await session.execute(session.makeSetPluginParam(id, EQPlugin, 'band0_gain', 3.0));
@@ -219,16 +274,16 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('throws on unknown param id', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(silentPCM(256), null, 256, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, silentPCM(256), null, 'T');
       const id = [...session.getState().tracks.keys()][0];
 
       expect(() => session.makeSetPluginParam(id, EQPlugin, 'bad_param', 1)).toThrow();
     });
 
     it('undo RemoveTrack restores EQ plugin params generically', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(tonePCM(512), null, 512, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, tonePCM(512), null, 'T');
       const id = [...session.getState().tracks.keys()][0];
 
       // Boost a mid band
@@ -245,8 +300,8 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
 
   describe('WASM output via SimulatedWorklet.processBlock()', () => {
     it('silent PCM track produces silent output', async () => {
-      const { session, worklet } = await makeSession();
-      await session.execute(session.makeAddTrack(silentPCM(1024), null, 1024, 44100, 'T'));
+      const { session, worklet, store } = await makeSession();
+      await addTrack(session, store, silentPCM(1024), null, 'T');
       worklet.postMessage({ type: 'cmd', fn: 'engine_play' });
       await new Promise((r) => setTimeout(r, 5));
 
@@ -256,8 +311,8 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('0.5 PCM track produces expected output through full chain', async () => {
-      const { session, worklet } = await makeSession();
-      await session.execute(session.makeAddTrack(tonePCM(1024, 0.5), null, 1024, 44100, 'T'));
+      const { session, worklet, store } = await makeSession();
+      await addTrack(session, store, tonePCM(1024, 0.5), null, 'T');
       worklet.postMessage({ type: 'cmd', fn: 'engine_play' });
       await new Promise((r) => setTimeout(r, 5));
 
@@ -267,8 +322,8 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('muting a track via Session silences WASM output', async () => {
-      const { session, worklet } = await makeSession();
-      await session.execute(session.makeAddTrack(tonePCM(1024, 0.5), null, 1024, 44100, 'T'));
+      const { session, worklet, store } = await makeSession();
+      await addTrack(session, store, tonePCM(1024, 0.5), null, 'T');
       const id = [...session.getState().tracks.keys()][0];
       await session.execute(session.makeSetMute(id, true));
 
@@ -280,8 +335,8 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('undo SetMute restores audible output', async () => {
-      const { session, worklet } = await makeSession();
-      await session.execute(session.makeAddTrack(tonePCM(1024, 0.5), null, 1024, 44100, 'T'));
+      const { session, worklet, store } = await makeSession();
+      await addTrack(session, store, tonePCM(1024, 0.5), null, 'T');
       const id = [...session.getState().tracks.keys()][0];
       await session.execute(session.makeSetMute(id, true));
 
@@ -301,9 +356,9 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('EQ gain boost via plugin command changes WASM output', async () => {
-      const { session, worklet } = await makeSession();
+      const { session, worklet, store } = await makeSession();
       // Use a non-trivial signal so EQ has something to act on
-      await session.execute(session.makeAddTrack(tonePCM(1024, 0.1), null, 1024, 44100, 'T'));
+      await addTrack(session, store, tonePCM(1024, 0.1), null, 'T');
       const id = [...session.getState().tracks.keys()][0];
 
       worklet.postMessage({ type: 'cmd', fn: 'engine_play' });
@@ -328,8 +383,8 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
 
   describe('Continuous controls', () => {
     it('commitContinuous pushes exactly one undo entry', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(silentPCM(256), null, 256, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, silentPCM(256), null, 'T');
       const id = [...session.getState().tracks.keys()][0];
 
       session.beginContinuous(session.makeSetGain(id, 1.0));
@@ -350,8 +405,8 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
 
   describe('Region model', () => {
     it('AddTrack creates a region with startFrame=0 in arrange state', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(silentPCM(1024), null, 1024, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, silentPCM(1024), null, 'T');
 
       const state = session.getState();
       expect(state.arrange.regions.size).toBe(1);
@@ -364,23 +419,23 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('makeAddTrack with initialStartFrame places region at that offset', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(silentPCM(1024), null, 1024, 44100, 'T', undefined, 44100));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, silentPCM(1024), null, 'T', 44100);
 
       const [region] = [...session.getState().arrange.regions.values()];
       expect(region.startFrame).toBe(44100);
     });
 
     it('undo AddTrack removes region from arrange state', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(silentPCM(256), null, 256, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, silentPCM(256), null, 'T');
       await session.undo();
       expect(session.getState().arrange.regions.size).toBe(0);
     });
 
     it('redo AddTrack restores region with same regionId', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(silentPCM(256), null, 256, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, silentPCM(256), null, 'T');
       const idBefore = [...session.getState().arrange.regions.keys()][0];
       await session.undo();
       await session.redo();
@@ -389,8 +444,8 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('waveform peaks are registered after AddTrack (keyed by regionId)', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(tonePCM(1024, 0.7), null, 1024, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, tonePCM(1024, 0.7), null, 'T');
       const regionId = [...session.getState().arrange.regions.keys()][0];
       const peaks = session.getWaveformPeaks(regionId);
       expect(peaks).toBeDefined();
@@ -399,24 +454,24 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('waveform peaks are unregistered after undo AddTrack', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(tonePCM(256), null, 256, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, tonePCM(256), null, 'T');
       const regionId = [...session.getState().arrange.regions.keys()][0];
       await session.undo();
       expect(session.getWaveformPeaks(regionId)).toBeUndefined();
     });
 
     it('makeMoveRegion updates startFrame in region map', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(tonePCM(44100), null, 44100, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, tonePCM(44100), null, 'T');
       const regionId = [...session.getState().arrange.regions.keys()][0];
       await session.execute(session.makeMoveRegion(regionId, 22050));
       expect(session.getState().arrange.regions.get(regionId)!.startFrame).toBe(22050);
     });
 
     it('undo MoveRegion restores startFrame', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(tonePCM(44100), null, 44100, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, tonePCM(44100), null, 'T');
       const regionId = [...session.getState().arrange.regions.keys()][0];
       await session.execute(session.makeMoveRegion(regionId, 22050));
       await session.undo();
@@ -424,8 +479,8 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('redo MoveRegion re-applies startFrame', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(tonePCM(44100), null, 44100, 44100, 'T'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, tonePCM(44100), null, 'T');
       const regionId = [...session.getState().arrange.regions.keys()][0];
       await session.execute(session.makeMoveRegion(regionId, 22050));
       await session.undo();
@@ -434,8 +489,8 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('MoveRegion delays audio output in WASM', async () => {
-      const { session, worklet } = await makeSession();
-      await session.execute(session.makeAddTrack(tonePCM(44100, 0.5), null, 44100, 44100, 'T'));
+      const { session, worklet, store } = await makeSession();
+      await addTrack(session, store, tonePCM(44100, 0.5), null, 'T');
       const regionId = [...session.getState().arrange.regions.keys()][0];
       // Move region to start at frame 256 — two 128-frame blocks must be silent
       await session.execute(session.makeMoveRegion(regionId, 256));
@@ -457,8 +512,8 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
       // PCM: silent for first 256 frames, then 0.5 for remaining 256
       const pcm = new Float32Array(512);
       pcm.fill(0.5, 256);
-      const { session, worklet } = await makeSession();
-      await session.execute(session.makeAddTrack(pcm, null, 512, 44100, 'T'));
+      const { session, worklet, store } = await makeSession();
+      await addTrack(session, store, pcm, null, 'T');
       const regionId = [...session.getState().arrange.regions.keys()][0];
 
       // Trim off the silent first 256 frames
@@ -475,8 +530,8 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     it('undo TrimRegion restores original audio', async () => {
       const pcm = new Float32Array(512);
       pcm.fill(0.5, 256); // silent first 256, loud last 256
-      const { session, worklet } = await makeSession();
-      await session.execute(session.makeAddTrack(pcm, null, 512, 44100, 'T'));
+      const { session, worklet, store } = await makeSession();
+      await addTrack(session, store, pcm, null, 'T');
       const regionId = [...session.getState().arrange.regions.keys()][0];
 
       await session.execute(session.makeTrimRegion(regionId, 256, 512));
@@ -491,9 +546,9 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('cross-track MoveRegion updates region trackId', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(tonePCM(256), null, 256, 44100, 'Track A'));
-      await session.execute(session.makeAddTrack(tonePCM(256), null, 256, 44100, 'Track B'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, tonePCM(256), null, 'Track A');
+      await addTrack(session, store, tonePCM(256), null, 'Track B');
 
       const state = session.getState();
       const trackIds = [...state.tracks.keys()];
@@ -508,9 +563,9 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('undo cross-track MoveRegion restores original trackId', async () => {
-      const { session } = await makeSession();
-      await session.execute(session.makeAddTrack(tonePCM(256), null, 256, 44100, 'Track A'));
-      await session.execute(session.makeAddTrack(tonePCM(256), null, 256, 44100, 'Track B'));
+      const { session, store } = await makeSession();
+      await addTrack(session, store, tonePCM(256), null, 'Track A');
+      await addTrack(session, store, tonePCM(256), null, 'Track B');
 
       const state = session.getState();
       const trackIds = [...state.tracks.keys()];
@@ -525,9 +580,9 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
     });
 
     it('cross-track MoveRegion applies destination track settings (mute) to WASM slot', async () => {
-      const { session, worklet } = await makeSession();
-      await session.execute(session.makeAddTrack(tonePCM(1024, 0.5), null, 1024, 44100, 'Source'));
-      await session.execute(session.makeAddTrack(silentPCM(256), null, 256, 44100, 'Dest'));
+      const { session, worklet, store } = await makeSession();
+      await addTrack(session, store, tonePCM(1024, 0.5), null, 'Source');
+      await addTrack(session, store, silentPCM(256), null, 'Dest');
 
       const state = session.getState();
       const trackIds = [...state.tracks.keys()];
@@ -554,7 +609,7 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
 
   describe('Master gain', () => {
     it('undo/redo SetMasterGain', async () => {
-      const { session } = await makeSession();
+      const { session, store } = await makeSession();
       expect(session.getState().masterGain).toBe(1.0);
 
       await session.execute(session.makeSetMasterGain(0.5));

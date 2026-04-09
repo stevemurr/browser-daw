@@ -15,11 +15,13 @@
 static int g_tid = -1;
 
 void setUp(void) {
-    float *sig = malloc(PCM_LEN * sizeof(float));
-    for (int i = 0;   i < 512;    i++) sig[i] = 0.0f;
-    for (int i = 512; i < PCM_LEN; i++) sig[i] = 0.5f;
-    g_tid = engine_add_track(sig, sig, PCM_LEN, 44100.0f);
-    free(sig);
+    float *sig_L = malloc(PCM_LEN * sizeof(float));
+    float *sig_R = malloc(PCM_LEN * sizeof(float));
+    for (int i = 0;   i < 512;    i++) { sig_L[i] = 0.0f; sig_R[i] = 0.0f; }
+    for (int i = 512; i < PCM_LEN; i++) { sig_L[i] = 0.5f; sig_R[i] = 0.5f; }
+    g_tid = engine_add_track_chunked(PCM_LEN, 44100.0f);
+    engine_load_chunk(g_tid, sig_L, sig_R, 0, PCM_LEN);
+    /* ownership transferred — do NOT free sig_L/sig_R */
     engine_play();
 }
 

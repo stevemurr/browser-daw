@@ -6,12 +6,16 @@ CFLAGS        = -O0 -g -Wall -Wextra -Iengine -Iengine/vendor/unity \
 LLVM_PROFDATA = xcrun llvm-profdata
 LLVM_COV      = xcrun llvm-cov
 
-ENGINE_SRCS = engine/engine.c engine/track.c engine/eq.c
+ENGINE_SRCS = engine/engine.c engine/track.c engine/eq.c \
+              engine/compressor.c engine/distortion.c engine/limiter.c \
+              engine/delay.c engine/chorus.c engine/reverb.c
 UNITY_SRC   = engine/vendor/unity/unity.c
 BUILD_DIR   = build
 
 # Source files to measure — excludes test harness and vendored unity
-COV_SRCS = engine/engine.c engine/track.c engine/eq.c
+COV_SRCS = engine/engine.c engine/track.c engine/eq.c \
+           engine/compressor.c engine/distortion.c engine/limiter.c \
+           engine/delay.c engine/chorus.c engine/reverb.c
 
 # ── Build targets ────────────────────────────────────────────────────────────
 
