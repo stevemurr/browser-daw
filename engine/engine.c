@@ -19,6 +19,15 @@ static int    g_playing      = 0;
 static float  g_sample_rate  = 44100.0f;
 static int    g_initialized  = 0;
 
+/* Deferred-seek ramp: eliminates the audible pop when the user scrubs the
+   playhead during live playback.
+   g_seek_ramp < 0  → fading out  (gain = -g_seek_ramp / N)
+   g_seek_ramp == 0 → idle; if g_pending_seek >= 0, apply the seek here
+   g_seek_ramp > 0  → fading in   (gain = (N - g_seek_ramp) / N)      */
+#define SEEK_RAMP_SAMPLES 128
+static long g_pending_seek = -1;
+static int  g_seek_ramp    = 0;
+
 static void ensure_init(void) {
     if (g_initialized) return;
     for (int i = 0; i < MAX_TRACKS; i++) {
@@ -197,10 +206,7 @@ void engine_plugin_set_param(int id, int plugin_id, int param_id, float value) {
 /* ---- Transport ---- */
 void  engine_play (void) { g_playing = 1; }
 void  engine_pause(void) { g_playing = 0; }
-void  engine_seek (long pos) {
-    g_playhead = pos;
-    /* Reset biquad state on all tracks so stale filter memory doesn't bleed
-       into the new playback position as a pop/click. */
+static void reset_all_dsp(void) {
     for (int i = 0; i < MAX_TRACKS; i++) {
         for (int b = 0; b < 3; b++) {
             biquad_reset(&g_tracks[i].eq.bands[b].filters[0]);
@@ -212,6 +218,18 @@ void  engine_seek (long pos) {
         chorus_reset(&g_tracks[i].chorus);
         reverb_reset(&g_tracks[i].reverb);
     }
+}
+
+void  engine_seek (long pos) {
+    if (!g_playing) {
+        /* Paused: apply immediately — no audible transition needed. */
+        g_playhead = pos;
+        reset_all_dsp();
+        return;
+    }
+    /* Playing: queue a deferred seek so engine_process() can cross-fade. */
+    g_pending_seek = pos;
+    g_seek_ramp    = -SEEK_RAMP_SAMPLES;   /* begin fade-out */
 }
 long  engine_get_playhead (void) { return g_playhead; }
 int   engine_is_playing   (void) { return g_playing; }
@@ -236,6 +254,14 @@ void engine_process(float* output_L, float* output_R, int frames) {
         float sum_R = 0.0f;
 
         if (g_playing) {
+            /* Deferred seek: fade-out complete — apply the queued seek now. */
+            if (g_seek_ramp == 0 && g_pending_seek >= 0) {
+                g_playhead     = g_pending_seek;
+                g_pending_seek = -1;
+                reset_all_dsp();
+                g_seek_ramp = SEEK_RAMP_SAMPLES;   /* begin fade-in */
+            }
+
             for (int i = 0; i < MAX_TRACKS; i++) {
                 if (!g_tracks[i].active) continue;
                 if (g_tracks[i].muted)   continue;
@@ -247,6 +273,22 @@ void engine_process(float* output_L, float* output_R, int frames) {
                 sum_R += tR;
             }
             g_playhead++;
+
+            /* Apply cross-fade gain if a seek ramp is in progress. */
+            if (g_seek_ramp != 0) {
+                float ramp_gain;
+                if (g_seek_ramp < 0) {
+                    /* Fading out: ramp from -N→-1, gain 1.0→(1/N) */
+                    ramp_gain = (float)(-g_seek_ramp) / SEEK_RAMP_SAMPLES;
+                    g_seek_ramp++;
+                } else {
+                    /* Fading in: ramp from N→1, gain 0.0→((N-1)/N) */
+                    ramp_gain = (float)(SEEK_RAMP_SAMPLES - g_seek_ramp) / SEEK_RAMP_SAMPLES;
+                    g_seek_ramp--;
+                }
+                sum_L *= ramp_gain;
+                sum_R *= ramp_gain;
+            }
         }
 
         /* Soft clip master output */

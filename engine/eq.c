@@ -134,9 +134,12 @@ void eq_set_param(TrackEQ* eq, int param_id, float value, float sample_rate) {
         case 2: b->q       = value; break;
     }
 
-    /* Recompute biquad coefficients with the updated params */
+    /* Recompute biquad coefficients with the updated params.
+       Do NOT reset filter state (x1/x2/y1/y2) — the delay-line history is still
+       valid signal data.  Zeroing it causes a one-sample discontinuity heard as a
+       click.  Leaving it intact lets the filter transition naturally to the new
+       frequency response without any audible artifact. */
     for (int ch = 0; ch < 2; ch++) {
-        biquad_reset(&b->filters[ch]);
         switch (b->type) {
             case BAND_LOW_SHELF:
                 biquad_set_lowshelf (&b->filters[ch], b->freq, b->gain_db, b->q, sample_rate);
