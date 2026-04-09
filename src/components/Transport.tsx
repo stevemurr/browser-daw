@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 import type { Session } from '../Session.js';
 import type { SessionState } from '../types.js';
 import { linearToDb, dbToLinear, formatDb } from '../waveform.js';
+import { SessionSelector } from './SessionSelector.js';
+import type { SessionListItem } from '../store/SessionStore.js';
 
 interface Props {
   session: Session;
@@ -11,9 +13,22 @@ interface Props {
   onPlay: () => void;
   onPause: () => void;
   onSeek: (pos: number) => void;
+  // Session management
+  sessionId: string | null;
+  sessionName: string;
+  sessions: SessionListItem[];
+  onSwitchSession: (id: string) => void;
+  onCreateSession: () => void;
+  onRenameSession: (id: string, name: string) => void;
+  onDeleteSession: (id: string) => void;
 }
 
-export function Transport({ session, state, isPlaying, playhead, onPlay, onPause }: Props) {
+export function Transport({
+  session, state, isPlaying, playhead,
+  onPlay, onPause,
+  sessionId, sessionName, sessions,
+  onSwitchSession, onCreateSession, onRenameSession, onDeleteSession,
+}: Props) {
   const seconds = Math.floor(playhead / 44100);
   const mm = String(Math.floor(seconds / 60)).padStart(2, '0');
   const ss = String(seconds % 60).padStart(2, '0');
@@ -37,6 +52,18 @@ export function Transport({ session, state, isPlaying, playhead, onPlay, onPause
 
   return (
     <div className="transport">
+      <SessionSelector
+        currentSessionId={sessionId}
+        currentName={sessionName}
+        sessions={sessions}
+        onSwitch={onSwitchSession}
+        onCreate={onCreateSession}
+        onRename={onRenameSession}
+        onDelete={onDeleteSession}
+      />
+
+      <span className="transport-sep">|</span>
+
       <button className="btn-transport-play" onClick={isPlaying ? onPause : onPlay}>
         <span className="transport-play-icon">
           <span style={{ visibility: isPlaying ? 'hidden' : 'visible' }}>▶</span>

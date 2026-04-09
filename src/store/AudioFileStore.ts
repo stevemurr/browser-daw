@@ -8,6 +8,7 @@
 // must happen on the main thread (or a dedicated non-audio Worker).
 
 import type { WaveformPeaks } from '../types.js';
+import { getDb, idbPut, idbGet, idbDelete, idbGetAll } from './idb.js';
 
 export interface AudioFileMeta {
   fileId: string;
@@ -54,69 +55,13 @@ export interface AudioFileStore {
 
 // ── OPFS implementation ───────────────────────────────────────────────────────
 
-const DB_NAME    = 'daw-metadata';
-const DB_VERSION = 1;
-
-function openDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains('files'))
-        db.createObjectStore('files', { keyPath: 'fileId' });
-      if (!db.objectStoreNames.contains('peaks'))
-        db.createObjectStore('peaks', { keyPath: 'fileId' });
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror   = () => reject(req.error);
-  });
-}
-
-function idbPut(db: IDBDatabase, store: string, value: unknown): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(store, 'readwrite');
-    tx.objectStore(store).put(value);
-    tx.oncomplete = () => resolve();
-    tx.onerror    = () => reject(tx.error);
-  });
-}
-
-function idbGet<T>(db: IDBDatabase, store: string, key: string): Promise<T | undefined> {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(store, 'readonly');
-    const req = tx.objectStore(store).get(key);
-    req.onsuccess = () => resolve(req.result as T | undefined);
-    req.onerror   = () => reject(req.error);
-  });
-}
-
-function idbDelete(db: IDBDatabase, store: string, key: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(store, 'readwrite');
-    tx.objectStore(store).delete(key);
-    tx.oncomplete = () => resolve();
-    tx.onerror    = () => reject(tx.error);
-  });
-}
-
-function idbGetAll<T>(db: IDBDatabase, store: string): Promise<T[]> {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(store, 'readonly');
-    const req = tx.objectStore(store).getAll();
-    req.onsuccess = () => resolve(req.result as T[]);
-    req.onerror   = () => reject(req.error);
-  });
-}
-
 export class OPFSAudioFileStore implements AudioFileStore {
-  private db: IDBDatabase | null = null;
   // Per-fileId write-lock: chains each write for the same file so concurrent
   // store() calls for the same fileId don't interleave and corrupt the file.
   private writeLocks = new Map<string, Promise<void>>();
 
   private async _db(): Promise<IDBDatabase> {
-    if (!this.db) this.db = await openDB();
-    return this.db;
+    return getDb();
   }
 
   private async _opfsRoot(): Promise<FileSystemDirectoryHandle> {

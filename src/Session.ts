@@ -13,6 +13,40 @@ import type { ChunkCacheManager, SlotMeta } from './ChunkCacheManager.js';
 // Re-export Command so callers don't need to import plugin.ts directly
 import type { Command } from './plugin.js';
 
+// ── Serialization types ───────────────────────────────────────────────────────
+
+export interface SerializedRegion {
+  regionId: string;
+  fileId: string;
+  startFrame: number;
+  trimStartFrame: number;
+  trimEndFrame: number;
+  numFrames: number;
+  sampleRate: number;
+}
+
+export interface SerializedTrack {
+  stableId: string;
+  name: string;
+  gain: number;
+  pan: number;
+  muted: boolean;
+  soloed: boolean;
+  plugins: Record<string, Record<string, number>>;
+  regions: SerializedRegion[];
+}
+
+export interface SerializedSession {
+  sessionId: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  masterGain: number;
+  tracks: SerializedTrack[];
+}
+
+export type SessionListItem = Pick<SerializedSession, 'sessionId' | 'name' | 'createdAt' | 'updatedAt'>;
+
 // ── Session ───────────────────────────────────────────────────────────────────
 
 /** Maximum number of undo entries kept in memory. Oldest entries are dropped first. */
@@ -306,6 +340,61 @@ export class Session {
 
   makeSetMasterGain(to: number): Command {
     return new SetMasterGainCommand(this, this.engine, this.masterGain, to);
+  }
+
+  /** Snapshot all non-volatile state to a plain JSON-serializable object. */
+  serialize(sessionId: string, name: string, createdAt?: number): SerializedSession {
+    const tracks: SerializedTrack[] = [];
+    for (const [stableId, track] of this.tracks) {
+      const regions: SerializedRegion[] = [];
+      for (const region of this.regions.values()) {
+        if (region.trackId !== stableId) continue;
+        regions.push({
+          regionId:       region.regionId,
+          fileId:         region.fileId,
+          startFrame:     region.startFrame,
+          trimStartFrame: region.trimStartFrame,
+          trimEndFrame:   region.trimEndFrame,
+          numFrames:      region.numFrames,
+          sampleRate:     region.sampleRate,
+          // engineSlot intentionally omitted — assigned fresh on restore
+        });
+      }
+      tracks.push({
+        stableId,
+        name:    track.name,
+        gain:    track.gain,
+        pan:     track.pan,
+        muted:   track.muted,
+        soloed:  track.soloed,
+        plugins: track.plugins as Record<string, Record<string, number>>,
+        regions,
+      });
+    }
+    return {
+      sessionId,
+      name,
+      createdAt:  createdAt ?? Date.now(),
+      updatedAt:  Date.now(),
+      masterGain: this.masterGain,
+      tracks,
+    };
+  }
+
+  /**
+   * Remove all tracks from the engine and chunk manager, and clear all in-memory
+   * state — without deleting OPFS files.  Call before switching sessions.
+   */
+  unloadSession(): void {
+    for (const region of this.regions.values()) {
+      this.engine.removeTrack(region.engineSlot);
+      this.chunkManager.unregisterSlot(region.engineSlot);
+    }
+    this.regions.clear();
+    this.tracks.clear();
+    this.waveformPeaks.clear();
+    this.undoStack = [];
+    this.redoStack = [];
   }
 
   /** Renders the full mix offline and triggers a WAV download. */
