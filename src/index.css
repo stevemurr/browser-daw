@@ -1,0 +1,57 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body { background: #1a1a1a; color: #e0e0e0; font-family: monospace; }
+
+.app          { display: flex; flex-direction: column; height: 100vh; }
+.init-btn     { margin: auto; padding: 1rem 2rem; font-size: 1.2rem; cursor: pointer;
+                background: #333; border: 1px solid #555; color: #e0e0e0; border-radius: 4px; }
+.init-btn:hover { background: #444; }
+
+/* Transport */
+.transport    { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem 1rem;
+                background: #111; border-bottom: 1px solid #333; flex-shrink: 0; }
+.transport button { padding: 0.4rem 0.8rem; background: #333; border: 1px solid #555;
+                    color: #e0e0e0; cursor: pointer; border-radius: 4px; font-family: monospace; font-size: 0.85rem; }
+.transport button:hover:not(:disabled) { background: #444; }
+.transport button:disabled { opacity: 0.35; cursor: default; }
+.time         { font-size: 1.1rem; letter-spacing: 2px; min-width: 4.5rem; }
+.transport-sep { color: #444; user-select: none; }
+
+/* Mixer */
+.mixer        { display: flex; flex-direction: row; gap: 2px; padding: 1rem;
+                overflow-x: auto; flex: 1; align-items: flex-start; }
+
+/* Track strip */
+.track-strip  { display: flex; flex-direction: column; gap: 0.4rem; background: #252525;
+                border: 1px solid #333; border-radius: 4px; padding: 0.75rem; min-width: 160px; }
+.track-strip.muted  { opacity: 0.5; }
+.track-strip.soloed { border-color: #f0c040; }
+.track-name   { font-size: 0.75rem; white-space: nowrap; overflow: hidden;
+                text-overflow: ellipsis; color: #aaa; margin-bottom: 0.25rem; }
+.param-row    { display: flex; align-items: center; gap: 0.35rem; }
+.param-row label { font-size: 0.7rem; color: #888; min-width: 2.2rem; }
+.param-row span  { font-size: 0.7rem; color: #aaa; min-width: 2.8rem; text-align: right; }
+input[type=range] { flex: 1; min-width: 0; accent-color: #4080c0; }
+.btn-row      { display: flex; gap: 0.3rem; }
+.btn-mute, .btn-solo, .btn-eq {
+  flex: 1; padding: 0.25rem 0.3rem; border: 1px solid #444; background: #333;
+  color: #ccc; cursor: pointer; border-radius: 3px; font-size: 0.75rem; font-family: monospace; }
+.btn-mute:hover, .btn-solo:hover, .btn-eq:hover { background: #3a3a3a; }
+.btn-mute.active  { background: #a03030; border-color: #e04040; color: white; }
+.btn-solo.active  { background: #806000; border-color: #f0c040; color: white; }
+.btn-eq.active    { background: #204060; border-color: #4080c0; color: white; }
+
+/* Master strip */
+.master-strip { display: flex; flex-direction: column; gap: 0.4rem; background: #1e2a1e;
+                border: 1px solid #3a5a3a; border-radius: 4px; padding: 0.75rem;
+                min-width: 120px; margin-left: auto; }
+
+/* EQ panel */
+.eq-panel     { background: #1a1a2e; border: 1px solid #334; border-radius: 4px;
+                padding: 0.5rem; display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.25rem; }
+.eq-band      { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.75rem; }
+.eq-band-label { color: #80a0ff; font-size: 0.7rem; font-weight: bold; margin-bottom: 0.1rem; }
+
+/* Drop hint */
+.drop-hint    { text-align: center; color: #555; padding: 3rem; font-size: 1.1rem;
+                border: 2px dashed #333; margin: 2rem; border-radius: 8px; }

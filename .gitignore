@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+coverage/
+
+# Playwright test artifacts
+test-results/
+playwright-report/
+
+# Native build artifacts
+engine/test_native
+engine/test_native.dSYM/
+engine/test_seek
+engine/test_seek.dSYM/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
