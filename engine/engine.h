@@ -8,10 +8,11 @@ void engine_remove_track(int track_id);
 int  engine_get_track_count(void);
 
 /* Per-track params */
-void engine_set_gain    (int track_id, float gain);
-void engine_set_pan     (int track_id, float pan);
-void engine_set_mute    (int track_id, int muted);
-void engine_set_solo    (int track_id, int soloed);
+void engine_set_gain       (int track_id, float gain);
+void engine_set_pan        (int track_id, float pan);
+void engine_set_mute       (int track_id, int muted);
+void engine_set_solo       (int track_id, int soloed);
+void engine_set_start_frame(int track_id, long start_frame);
 
 /* Plugin params — plugin_id and param_id constants in plugin_ids.h */
 void engine_plugin_set_param(int track_id, int plugin_id, int param_id, float value);

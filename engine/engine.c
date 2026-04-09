@@ -92,6 +92,11 @@ void engine_set_solo(int id, int soloed) {
     g_tracks[id].soloed = soloed;
 }
 
+void engine_set_start_frame(int id, long start_frame) {
+    if (id < 0 || id >= MAX_TRACKS || !g_tracks[id].active) return;
+    g_tracks[id].start_frame = start_frame;
+}
+
 /* ---- Plugin params ---- */
 void engine_plugin_set_param(int id, int plugin_id, int param_id, float value) {
     if (id < 0 || id >= MAX_TRACKS || !g_tracks[id].active) return;

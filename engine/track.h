@@ -10,6 +10,7 @@ typedef struct {
     float*  pcm_L;
     float*  pcm_R;
     long    num_frames;   /* total frames (not samples) */
+    long    start_frame;  /* global playhead offset for this slot (default 0) */
     int     active;       /* slot in use */
 
     /* Mix params */

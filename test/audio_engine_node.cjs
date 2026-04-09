@@ -1392,6 +1392,7 @@ var _engine_set_gain = Module['_engine_set_gain'] = makeInvalidEarlyAccess('_eng
 var _engine_set_pan = Module['_engine_set_pan'] = makeInvalidEarlyAccess('_engine_set_pan');
 var _engine_set_mute = Module['_engine_set_mute'] = makeInvalidEarlyAccess('_engine_set_mute');
 var _engine_set_solo = Module['_engine_set_solo'] = makeInvalidEarlyAccess('_engine_set_solo');
+var _engine_set_start_frame = Module['_engine_set_start_frame'] = makeInvalidEarlyAccess('_engine_set_start_frame');
 var _engine_plugin_set_param = Module['_engine_plugin_set_param'] = makeInvalidEarlyAccess('_engine_plugin_set_param');
 var _engine_play = Module['_engine_play'] = makeInvalidEarlyAccess('_engine_play');
 var _engine_pause = Module['_engine_pause'] = makeInvalidEarlyAccess('_engine_pause');
@@ -1425,6 +1426,7 @@ function assignWasmExports(wasmExports) {
   assert(typeof wasmExports['engine_set_pan'] != 'undefined', 'missing Wasm export: engine_set_pan');
   assert(typeof wasmExports['engine_set_mute'] != 'undefined', 'missing Wasm export: engine_set_mute');
   assert(typeof wasmExports['engine_set_solo'] != 'undefined', 'missing Wasm export: engine_set_solo');
+  assert(typeof wasmExports['engine_set_start_frame'] != 'undefined', 'missing Wasm export: engine_set_start_frame');
   assert(typeof wasmExports['engine_plugin_set_param'] != 'undefined', 'missing Wasm export: engine_plugin_set_param');
   assert(typeof wasmExports['engine_play'] != 'undefined', 'missing Wasm export: engine_play');
   assert(typeof wasmExports['engine_pause'] != 'undefined', 'missing Wasm export: engine_pause');
@@ -1455,6 +1457,7 @@ function assignWasmExports(wasmExports) {
   _engine_set_pan = Module['_engine_set_pan'] = createExportWrapper('engine_set_pan', 2);
   _engine_set_mute = Module['_engine_set_mute'] = createExportWrapper('engine_set_mute', 2);
   _engine_set_solo = Module['_engine_set_solo'] = createExportWrapper('engine_set_solo', 2);
+  _engine_set_start_frame = Module['_engine_set_start_frame'] = createExportWrapper('engine_set_start_frame', 2);
   _engine_plugin_set_param = Module['_engine_plugin_set_param'] = createExportWrapper('engine_plugin_set_param', 4);
   _engine_play = Module['_engine_play'] = createExportWrapper('engine_play', 0);
   _engine_pause = Module['_engine_pause'] = createExportWrapper('engine_pause', 0);

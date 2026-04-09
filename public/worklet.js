@@ -20,18 +20,23 @@ class MixerProcessor extends AudioWorkletProcessor {
       if (t === 'ping') {
         this.port.postMessage({ type: 'pong' });
       } else if (t === 'init') {
-        this._initWasm(e.data.wasmBytes);
+        // Production path: AudioEngine sends raw bytes (ArrayBuffer) to avoid
+        // Chrome's silent-drop of WebAssembly.Module objects on AudioWorklet ports.
+        // Test path: harness sends a pre-compiled WebAssembly.Module for efficiency.
+        this._initWasm(e.data.wasmModule ?? e.data.wasmBytes);
       } else if (t === 'cmd') {
         this._handleCmd(e.data);
       }
     };
   }
 
-  async _initWasm(wasmBytes) {
+  async _initWasm(wasmData) {
     try {
-      const { instance } = await WebAssembly.instantiate(wasmBytes, {
-        env: { emscripten_resize_heap: () => 0 },
-      });
+      const imports = { env: { emscripten_resize_heap: () => 0 } };
+      const result = await WebAssembly.instantiate(wasmData, imports);
+      // instantiate returns a WebAssembly.Instance when given a compiled Module,
+      // or { module, instance } when given raw bytes.
+      const instance = result instanceof WebAssembly.Instance ? result : result.instance;
       this.exports = instance.exports;
       this.outPtrL = this.exports.malloc(128 * 4);
       this.outPtrR = this.exports.malloc(128 * 4);
@@ -76,6 +81,7 @@ class MixerProcessor extends AudioWorkletProcessor {
       case 'engine_plugin_set_param':
         e.engine_plugin_set_param(cmd.id, cmd.pluginId, cmd.paramId, cmd.value);
         break;
+      case 'engine_set_start_frame': e.engine_set_start_frame(cmd.id, cmd.startFrame); break;
       case 'engine_play':            e.engine_play(); break;
       case 'engine_pause':           e.engine_pause(); break;
       case 'engine_seek':            e.engine_seek(cmd.position); break;

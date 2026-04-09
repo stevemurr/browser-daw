@@ -24,10 +24,11 @@ void track_process_frame(Track* t, long playhead,
     *out_L = 0.0f;
     *out_R = 0.0f;
 
-    if (!t->active || !t->pcm_L || playhead >= t->num_frames) return;
+    long local = playhead - t->start_frame;
+    if (!t->active || !t->pcm_L || local < 0 || local >= t->num_frames) return;
 
-    float raw_L = t->pcm_L[playhead];
-    float raw_R = t->pcm_R ? t->pcm_R[playhead] : raw_L; /* mono fallback */
+    float raw_L = t->pcm_L[local];
+    float raw_R = t->pcm_R ? t->pcm_R[local] : raw_L; /* mono fallback */
 
     /* Apply EQ */
     float eq_L = eq_process_sample(&t->eq, raw_L, 0);

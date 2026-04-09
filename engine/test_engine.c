@@ -243,6 +243,56 @@ void test_alloc_free_pcm(void) {
     engine_free_pcm(buf);
 }
 
+void test_start_frame_silence_before_offset(void) {
+    /* Track starts at frame 64 — first 64 frames must be silent */
+    g_tid = add_constant_track(0.5f);
+    engine_set_start_frame(g_tid, 64);
+    engine_play();
+
+    float out_L[FRAMES], out_R[FRAMES];
+    engine_process(out_L, out_R, 64);  /* first 64 frames */
+
+    for (int i = 0; i < 64; i++) {
+        TEST_ASSERT_FLOAT_WITHIN(1e-7f, 0.0f, out_L[i]);
+        TEST_ASSERT_FLOAT_WITHIN(1e-7f, 0.0f, out_R[i]);
+    }
+}
+
+void test_start_frame_audio_at_offset(void) {
+    /* Track starts at frame 64 — frames 64+ must carry audio */
+    g_tid = add_constant_track(0.5f);
+    engine_set_start_frame(g_tid, 64);
+    engine_play();
+
+    float out_L[FRAMES], out_R[FRAMES];
+    engine_process(out_L, out_R, FRAMES);  /* 128 frames; frames 64-127 have audio */
+
+    /* Frame 64 (local index 0 in PCM) should be non-zero */
+    TEST_ASSERT_FLOAT_NOT_WITHIN(1e-7f, 0.0f, out_L[64]);
+    TEST_ASSERT_FLOAT_NOT_WITHIN(1e-7f, 0.0f, out_R[64]);
+}
+
+void test_start_frame_zero_is_default_behaviour(void) {
+    /* start_frame=0 must behave identically to the pre-existing behaviour */
+    g_tid = add_constant_track(0.5f);
+    /* do NOT call engine_set_start_frame — default should be 0 */
+    engine_play();
+
+    float out_L[FRAMES], out_R[FRAMES];
+    engine_process(out_L, out_R, FRAMES);
+
+    float expected = tanhf(0.5f * cosf(3.14159265f / 4.0f));
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, expected, out_L[0]);
+}
+
+void test_set_start_frame_invalid_id_no_crash(void) {
+    /* Must not crash or corrupt state for out-of-range IDs */
+    engine_set_start_frame(-1, 100);
+    engine_set_start_frame(32, 100);  /* MAX_TRACKS = 32 */
+    engine_set_start_frame(99, 100);
+    TEST_PASS();
+}
+
 /* ── Runner ─────────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -261,5 +311,9 @@ int main(void) {
     RUN_TEST(test_track_count);
     RUN_TEST(test_is_playing_reflects_transport);
     RUN_TEST(test_alloc_free_pcm);
+    RUN_TEST(test_start_frame_silence_before_offset);
+    RUN_TEST(test_start_frame_audio_at_offset);
+    RUN_TEST(test_start_frame_zero_is_default_behaviour);
+    RUN_TEST(test_set_start_frame_invalid_id_no_crash);
     return UNITY_END();
 }

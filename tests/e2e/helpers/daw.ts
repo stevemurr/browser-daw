@@ -50,7 +50,7 @@ export class DawPage {
           .__daw.injectTrack(pcm, sampleRate, name),
       { pcm, sampleRate, name },
     );
-    await this.page.waitForSelector('.track-strip');
+    await this.page.waitForSelector('.arrange-track-row');
   }
 
   async play(): Promise<void> {
@@ -94,11 +94,33 @@ export class DawPage {
   }
 
   async muteTrack(index = 0): Promise<void> {
-    await this.page.locator('.track-strip .btn-mute').nth(index).click();
+    await this.page.locator('.track-header .btn-mute').nth(index).click();
   }
 
   async soloTrack(index = 0): Promise<void> {
-    await this.page.locator('.track-strip .btn-solo').nth(index).click();
+    await this.page.locator('.track-header .btn-solo').nth(index).click();
+  }
+
+  /**
+   * Simulate dragging the first region in fromTrackIndex's lane into toTrackIndex's lane.
+   * Uses Playwright mouse API with intermediate steps to trigger enough mousemove events
+   * for the RAF-throttled drag preview to fire.
+   */
+  async dragRegion(fromTrackIndex: number, toTrackIndex: number): Promise<void> {
+    const rows = this.page.locator('.arrange-track-row');
+    const fromBox = await rows.nth(fromTrackIndex).locator('.arrange-lane-cell').boundingBox();
+    const toBox   = await rows.nth(toTrackIndex).boundingBox();
+    if (!fromBox || !toBox) throw new Error('Track rows not found in DOM');
+
+    // Region starts at frame 0; click ~100px into the lane cell (clear of trim handles)
+    const srcX = fromBox.x + 100;
+    const srcY = fromBox.y + fromBox.height / 2;
+    const dstY = toBox.y + toBox.height / 2;
+
+    await this.page.mouse.move(srcX, srcY);
+    await this.page.mouse.down();
+    await this.page.mouse.move(srcX, dstY, { steps: 15 });
+    await this.page.mouse.up();
   }
 
   /** Set a track's gain via the session API (exact, no slider drag needed). */

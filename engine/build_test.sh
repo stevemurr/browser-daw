@@ -18,6 +18,7 @@ EXPORTED_FUNCTIONS='[
   "_engine_get_playhead",
   "_engine_is_playing",
   "_engine_set_master_gain",
+  "_engine_set_start_frame",
   "_engine_process",
   "_engine_alloc_pcm",
   "_engine_free_pcm",

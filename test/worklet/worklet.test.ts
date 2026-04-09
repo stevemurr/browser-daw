@@ -141,6 +141,54 @@ describe('mixer commands', () => {
   });
 });
 
+describe('engine_set_start_frame command', () => {
+  it('does not throw for a valid track slot', async () => {
+    const proc = await initProcessor();
+    const added = proc.port.nextMessage('track_added');
+    proc.port.deliver({
+      type: 'cmd', fn: 'engine_add_track',
+      pcmL: makePCM(44100), pcmR: null,
+      numFrames: 44100, sampleRate: 44100, seq: 1,
+    });
+    await added;
+    expect(() =>
+      proc.port.deliver({ type: 'cmd', fn: 'engine_set_start_frame', id: 0, startFrame: 44100 }),
+    ).not.toThrow();
+  });
+
+  it('delays audio output by the given frame count', async () => {
+    const proc = await initProcessor();
+    const added = proc.port.nextMessage('track_added');
+    proc.port.deliver({
+      type: 'cmd', fn: 'engine_add_track',
+      pcmL: makePCM(44100, 0.5), pcmR: null,
+      numFrames: 44100, sampleRate: 44100, seq: 1,
+    });
+    await added;
+
+    // start_frame=256 → first two 128-frame blocks must be silent
+    proc.port.deliver({ type: 'cmd', fn: 'engine_set_start_frame', id: 0, startFrame: 256 });
+    proc.port.deliver({ type: 'cmd', fn: 'engine_play' });
+
+    const L1 = new Float32Array(128);
+    const R1 = new Float32Array(128);
+    proc.process([], [[L1, R1]]);
+
+    const L2 = new Float32Array(128);
+    const R2 = new Float32Array(128);
+    proc.process([], [[L2, R2]]);
+
+    expect(L1.every(x => x === 0)).toBe(true);
+    expect(L2.every(x => x === 0)).toBe(true);
+
+    // Third block (frames 256-383) has audio
+    const L3 = new Float32Array(128);
+    const R3 = new Float32Array(128);
+    proc.process([], [[L3, R3]]);
+    expect(L3.some(x => Math.abs(x) > 0.01)).toBe(true);
+  });
+});
+
 describe('process()', () => {
   it('returns true to keep the processor alive', async () => {
     const proc = await initProcessor();

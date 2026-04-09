@@ -20,6 +20,7 @@ interface EmscriptenModule {
   _engine_set_mute(id: number, v: number): void;
   _engine_set_solo(id: number, v: number): void;
   _engine_plugin_set_param(id: number, pluginId: number, paramId: number, value: number): void;
+  _engine_set_start_frame(id: number, startFrame: number): void;
   _engine_play(): void;
   _engine_pause(): void;
   _engine_seek(pos: number): void;
@@ -92,8 +93,9 @@ export class SimulatedWorklet implements IWorkletPort {
         this.onmessage?.({ data: { type: 'track_added', id, seq } });
         break;
       }
-      case 'engine_remove_track':    M._engine_remove_track((cmd as IdCmd).id); break;
-      case 'engine_set_gain':        M._engine_set_gain((cmd as ValueCmd).id, (cmd as ValueCmd).value); break;
+      case 'engine_remove_track':       M._engine_remove_track((cmd as IdCmd).id); break;
+      case 'engine_set_start_frame':    M._engine_set_start_frame((cmd as StartFrameCmd).id, (cmd as StartFrameCmd).startFrame); break;
+      case 'engine_set_gain':           M._engine_set_gain((cmd as ValueCmd).id, (cmd as ValueCmd).value); break;
       case 'engine_set_pan':         M._engine_set_pan((cmd as ValueCmd).id, (cmd as ValueCmd).value); break;
       case 'engine_set_mute':        M._engine_set_mute((cmd as MuteCmd).id, (cmd as MuteCmd).muted ? 1 : 0); break;
       case 'engine_set_solo':        M._engine_set_solo((cmd as SoloCmd).id, (cmd as SoloCmd).soloed ? 1 : 0); break;
@@ -139,9 +141,10 @@ export class SimulatedWorklet implements IWorkletPort {
 
 // ── Internal message type helpers ─────────────────────────────────────────────
 
-interface CmdMsg         { type: 'cmd'; fn: string }
-interface IdCmd          extends CmdMsg { id: number }
-interface ValueCmd       extends IdCmd  { value: number }
+interface CmdMsg          { type: 'cmd'; fn: string }
+interface IdCmd           extends CmdMsg { id: number }
+interface StartFrameCmd   extends IdCmd  { startFrame: number }
+interface ValueCmd        extends IdCmd  { value: number }
 interface MuteCmd        extends IdCmd  { muted: boolean }
 interface SoloCmd        extends IdCmd  { soloed: boolean }
 interface PluginParamCmd extends IdCmd  { pluginId: number; paramId: number; value: number }

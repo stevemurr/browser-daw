@@ -44,7 +44,9 @@ export function TrackStrip({ session, track }: Props) {
           onChange={e => {
             const v = parseFloat(e.target.value);
             setLocalGain(v);
-            session.getEngine().setGain(track.engineSlot, v);
+            for (const r of session.regionsForTrack(track.stableId)) {
+              session.getEngine().setGain(r.engineSlot, v);
+            }
           }}
           onMouseUp={e => {
             gainDragging.current = false;
@@ -65,7 +67,9 @@ export function TrackStrip({ session, track }: Props) {
           onChange={e => {
             const v = parseFloat(e.target.value);
             setLocalPan(v);
-            session.getEngine().setPan(track.engineSlot, v);
+            for (const r of session.regionsForTrack(track.stableId)) {
+              session.getEngine().setPan(r.engineSlot, v);
+            }
           }}
           onMouseUp={e => {
             panDragging.current = false;

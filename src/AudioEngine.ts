@@ -141,19 +141,30 @@ export class AudioEngine {
   // ── Public API ──────────────────────────────────────────────────────────
 
   // Returns the engine slot assigned by the WASM.
-  // Copies pcmL/pcmR so the caller retains the originals for undo/redo.
+  // Slices pcmL/pcmR so the caller retains the originals for undo/redo,
+  // then transfers the slice buffers to avoid a second structured-clone copy
+  // in postMessage (which would otherwise serialize hundreds of MB on the main thread).
   addTrack(pcmL: Float32Array, pcmR: Float32Array | null, numFrames: number, sampleRate: number): Promise<number> {
     const seq = this._nextSeq();
+    if (import.meta.env.DEV) performance.mark('engine:addTrack-postMessage-start');
+    const pcmLCopy = pcmL.slice();
+    const pcmRCopy = pcmR ? pcmR.slice() : null;
+    const transferList: ArrayBuffer[] = [pcmLCopy.buffer];
+    if (pcmRCopy) transferList.push(pcmRCopy.buffer);
     return new Promise<number>((resolve, reject) => {
       this.pending.set(seq, { resolve, reject });
       this.port.postMessage({
         type: 'cmd', fn: 'engine_add_track',
         seq,
-        pcmL: pcmL.slice(),        // copy — caller keeps original for redo
-        pcmR: pcmR ? pcmR.slice() : null,
+        pcmL: pcmLCopy,
+        pcmR: pcmRCopy,
         numFrames,
         sampleRate,
-      });
+      }, transferList);
+      if (import.meta.env.DEV) {
+        performance.mark('engine:addTrack-postMessage-end');
+        performance.measure('engine:addTrack-postMessage', 'engine:addTrack-postMessage-start', 'engine:addTrack-postMessage-end');
+      }
     });
   }
 
@@ -183,6 +194,10 @@ export class AudioEngine {
 
   setMasterGain(value: number): void {
     this.port.postMessage({ type: 'cmd', fn: 'engine_set_master_gain', value });
+  }
+
+  setStartFrame(slot: number, startFrame: number): void {
+    this.port.postMessage({ type: 'cmd', fn: 'engine_set_start_frame', id: slot, startFrame });
   }
 
   play():                    void { this.port.postMessage({ type: 'cmd', fn: 'engine_play' }); }

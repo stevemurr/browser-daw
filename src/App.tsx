@@ -3,7 +3,8 @@ import { AudioEngine } from './AudioEngine.js';
 import { Session } from './Session.js';
 import type { SessionState } from './types.js';
 import { Transport } from './components/Transport.js';
-import { Mixer } from './components/Mixer.js';
+import { ArrangeView } from './components/ArrangeView.js';
+import { useKeyboard } from './hooks/useKeyboard.js';
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -12,6 +13,11 @@ export default function App() {
   const [playhead, setPlayhead] = useState(0);
   const [initError, setInitError] = useState<string | null>(null);
   const ctxRef = useRef<AudioContext | null>(null);
+  // Stable ref so keyboard handlers always have the latest values without re-subscribing
+  const isPlayingRef = useRef(isPlaying);
+  isPlayingRef.current = isPlaying;
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
 
   const initEngine = useCallback(async () => {
     setInitError(null);
@@ -28,8 +34,6 @@ export default function App() {
     if (import.meta.env.DEV) {
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 2048;
-      // Tap worklet output into analyser; route through silent gain so the
-      // analyser is pulled by the audio graph without doubling the output level.
       engine.tap(analyser);
       const silentGain = ctx.createGain();
       silentGain.gain.value = 0;
@@ -71,21 +75,6 @@ export default function App() {
     });
   }, [initEngine]);
 
-  const handleDrop = useCallback(async (e: React.DragEvent) => {
-    e.preventDefault();
-    if (!session || !ctxRef.current) return;
-    const ctx = ctxRef.current;
-    const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('audio/'));
-    for (const file of files) {
-      const buf = await ctx.decodeAudioData(await file.arrayBuffer());
-      const pcmL = buf.getChannelData(0);
-      const pcmR = buf.numberOfChannels > 1 ? buf.getChannelData(1) : null;
-      await session.execute(
-        session.makeAddTrack(pcmL, pcmR, buf.length, buf.sampleRate, file.name)
-      );
-    }
-  }, [session]);
-
   const handlePlay = useCallback(() => {
     if (!session) return;
     ctxRef.current?.resume();
@@ -103,12 +92,23 @@ export default function App() {
     session?.getEngine().seek(pos);
   }, [session]);
 
+  // ── Keyboard shortcuts ─────────────────────────────────────────────────────
+  useKeyboard({
+    ' ': () => {
+      if (!sessionRef.current) return;
+      if (isPlayingRef.current) {
+        sessionRef.current.getEngine().pause();
+        setIsPlaying(false);
+      } else {
+        ctxRef.current?.resume();
+        sessionRef.current.getEngine().play();
+        setIsPlaying(true);
+      }
+    },
+  });
+
   return (
-    <div
-      className="app"
-      onDrop={handleDrop}
-      onDragOver={e => e.preventDefault()}
-    >
+    <div className="app">
       {!session ? (
         <>
           <button className="init-btn" onClick={handleInitClick}>
@@ -129,10 +129,13 @@ export default function App() {
             onPause={handlePause}
             onSeek={handleSeek}
           />
-          <Mixer session={session} state={state!} />
-          {state!.tracks.size === 0 && (
-            <div className="drop-hint">Drop audio files here to add tracks</div>
-          )}
+          <ArrangeView
+            session={session}
+            state={state!}
+            playhead={playhead}
+            onSeek={handleSeek}
+            audioContext={ctxRef.current}
+          />
         </>
       )}
     </div>

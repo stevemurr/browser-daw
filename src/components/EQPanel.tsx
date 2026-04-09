@@ -38,9 +38,9 @@ export function EQPanel({ session, track }: Props) {
   const handleChange = (paramId: string, value: number) => {
     const param = EQPlugin.params.find(p => p.id === paramId)!;
     setLocal(prev => ({ ...prev, [paramId]: value }));
-    session.getEngine().setPluginParam(
-      track.engineSlot, EQPlugin.pluginId, param.cParamId, value
-    );
+    for (const r of session.regionsForTrack(track.stableId)) {
+      session.getEngine().setPluginParam(r.engineSlot, EQPlugin.pluginId, param.cParamId, value);
+    }
   };
 
   const handleCommit = (paramId: string, value: number) => {

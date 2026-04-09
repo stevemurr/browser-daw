@@ -43,8 +43,10 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
       const track = [...state.tracks.values()][0];
       expect(track.name).toBe('Track 1');
       expect(track.gain).toBe(1.0);
-      expect(track.engineSlot).toBeGreaterThanOrEqual(0);
-      expect(track.engineSlot).toBeLessThan(32);
+      // engineSlot now lives on the region, not the track
+      const region = [...state.arrange.regions.values()][0];
+      expect(region.engineSlot).toBeGreaterThanOrEqual(0);
+      expect(region.engineSlot).toBeLessThan(32);
     });
 
     it('initialises plugin state with defaults for all registered plugins', async () => {
@@ -65,7 +67,7 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
       await session.execute(session.makeAddTrack(tonePCM(512), null, 512, 44100, 'A'));
       await session.execute(session.makeAddTrack(tonePCM(512), null, 512, 44100, 'B'));
 
-      const slots = [...session.getState().tracks.values()].map((t) => t.engineSlot);
+      const slots = [...session.getState().arrange.regions.values()].map((r) => r.engineSlot);
       expect(slots[0]).not.toBe(slots[1]);
     });
 
@@ -81,7 +83,8 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
       const names = new Set(tracks.map((t) => t.name));
       expect(names).toContain('X');
       expect(names).toContain('Y');
-      expect(tracks[0].engineSlot).not.toBe(tracks[1].engineSlot);
+      const regions = [...session.getState().arrange.regions.values()];
+      expect(regions[0].engineSlot).not.toBe(regions[1].engineSlot);
     });
   });
 
@@ -342,6 +345,210 @@ describe('Session ↔ AudioEngine ↔ WASM', () => {
       await session.undo();
       expect(session.getState().tracks.get(id)!.gain).toBe(1.0);
       expect(session.getState().canUndo).toBe(true);
+    });
+  });
+
+  describe('Region model', () => {
+    it('AddTrack creates a region with startFrame=0 in arrange state', async () => {
+      const { session } = await makeSession();
+      await session.execute(session.makeAddTrack(silentPCM(1024), null, 1024, 44100, 'T'));
+
+      const state = session.getState();
+      expect(state.arrange.regions.size).toBe(1);
+      const [region] = [...state.arrange.regions.values()];
+      const trackId = [...state.tracks.keys()][0];
+      expect(region.trackId).toBe(trackId);
+      expect(region.startFrame).toBe(0);
+      expect(region.trimStartFrame).toBe(0);
+      expect(region.trimEndFrame).toBe(1024);
+    });
+
+    it('makeAddTrack with initialStartFrame places region at that offset', async () => {
+      const { session } = await makeSession();
+      await session.execute(session.makeAddTrack(silentPCM(1024), null, 1024, 44100, 'T', undefined, 44100));
+
+      const [region] = [...session.getState().arrange.regions.values()];
+      expect(region.startFrame).toBe(44100);
+    });
+
+    it('undo AddTrack removes region from arrange state', async () => {
+      const { session } = await makeSession();
+      await session.execute(session.makeAddTrack(silentPCM(256), null, 256, 44100, 'T'));
+      await session.undo();
+      expect(session.getState().arrange.regions.size).toBe(0);
+    });
+
+    it('redo AddTrack restores region with same regionId', async () => {
+      const { session } = await makeSession();
+      await session.execute(session.makeAddTrack(silentPCM(256), null, 256, 44100, 'T'));
+      const idBefore = [...session.getState().arrange.regions.keys()][0];
+      await session.undo();
+      await session.redo();
+      const idAfter = [...session.getState().arrange.regions.keys()][0];
+      expect(idAfter).toBe(idBefore);
+    });
+
+    it('waveform peaks are registered after AddTrack (keyed by regionId)', async () => {
+      const { session } = await makeSession();
+      await session.execute(session.makeAddTrack(tonePCM(1024, 0.7), null, 1024, 44100, 'T'));
+      const regionId = [...session.getState().arrange.regions.keys()][0];
+      const peaks = session.getWaveformPeaks(regionId);
+      expect(peaks).toBeDefined();
+      expect(peaks!.peaksL.length).toBeGreaterThan(0);
+      expect(peaks!.peaksL.every(v => Math.abs(v - 0.7) < 1e-5)).toBe(true);
+    });
+
+    it('waveform peaks are unregistered after undo AddTrack', async () => {
+      const { session } = await makeSession();
+      await session.execute(session.makeAddTrack(tonePCM(256), null, 256, 44100, 'T'));
+      const regionId = [...session.getState().arrange.regions.keys()][0];
+      await session.undo();
+      expect(session.getWaveformPeaks(regionId)).toBeUndefined();
+    });
+
+    it('makeMoveRegion updates startFrame in region map', async () => {
+      const { session } = await makeSession();
+      await session.execute(session.makeAddTrack(tonePCM(44100), null, 44100, 44100, 'T'));
+      const regionId = [...session.getState().arrange.regions.keys()][0];
+      await session.execute(session.makeMoveRegion(regionId, 22050));
+      expect(session.getState().arrange.regions.get(regionId)!.startFrame).toBe(22050);
+    });
+
+    it('undo MoveRegion restores startFrame', async () => {
+      const { session } = await makeSession();
+      await session.execute(session.makeAddTrack(tonePCM(44100), null, 44100, 44100, 'T'));
+      const regionId = [...session.getState().arrange.regions.keys()][0];
+      await session.execute(session.makeMoveRegion(regionId, 22050));
+      await session.undo();
+      expect(session.getState().arrange.regions.get(regionId)!.startFrame).toBe(0);
+    });
+
+    it('redo MoveRegion re-applies startFrame', async () => {
+      const { session } = await makeSession();
+      await session.execute(session.makeAddTrack(tonePCM(44100), null, 44100, 44100, 'T'));
+      const regionId = [...session.getState().arrange.regions.keys()][0];
+      await session.execute(session.makeMoveRegion(regionId, 22050));
+      await session.undo();
+      await session.redo();
+      expect(session.getState().arrange.regions.get(regionId)!.startFrame).toBe(22050);
+    });
+
+    it('MoveRegion delays audio output in WASM', async () => {
+      const { session, worklet } = await makeSession();
+      await session.execute(session.makeAddTrack(tonePCM(44100, 0.5), null, 44100, 44100, 'T'));
+      const regionId = [...session.getState().arrange.regions.keys()][0];
+      // Move region to start at frame 256 — two 128-frame blocks must be silent
+      await session.execute(session.makeMoveRegion(regionId, 256));
+
+      worklet.postMessage({ type: 'cmd', fn: 'engine_play' });
+      await new Promise((r) => setTimeout(r, 5));
+
+      const { L: L1 } = worklet.processBlock();
+      const { L: L2 } = worklet.processBlock();
+      expect(L1.every(v => Math.abs(v) < 1e-7)).toBe(true);
+      expect(L2.every(v => Math.abs(v) < 1e-7)).toBe(true);
+
+      // Third block (frames 256-383) has audio
+      const { L: L3 } = worklet.processBlock();
+      expect(L3.some(v => Math.abs(v) > 0.01)).toBe(true);
+    });
+
+    it('TrimRegion trims audio output', async () => {
+      // PCM: silent for first 256 frames, then 0.5 for remaining 256
+      const pcm = new Float32Array(512);
+      pcm.fill(0.5, 256);
+      const { session, worklet } = await makeSession();
+      await session.execute(session.makeAddTrack(pcm, null, 512, 44100, 'T'));
+      const regionId = [...session.getState().arrange.regions.keys()][0];
+
+      // Trim off the silent first 256 frames
+      await session.execute(session.makeTrimRegion(regionId, 256, 512));
+
+      worklet.postMessage({ type: 'cmd', fn: 'engine_play' });
+      await new Promise((r) => setTimeout(r, 5));
+
+      // First block should now be the loud part
+      const { L } = worklet.processBlock();
+      expect(L.some(v => Math.abs(v) > 0.01)).toBe(true);
+    });
+
+    it('undo TrimRegion restores original audio', async () => {
+      const pcm = new Float32Array(512);
+      pcm.fill(0.5, 256); // silent first 256, loud last 256
+      const { session, worklet } = await makeSession();
+      await session.execute(session.makeAddTrack(pcm, null, 512, 44100, 'T'));
+      const regionId = [...session.getState().arrange.regions.keys()][0];
+
+      await session.execute(session.makeTrimRegion(regionId, 256, 512));
+      await session.undo();
+
+      worklet.postMessage({ type: 'cmd', fn: 'engine_play' });
+      await new Promise((r) => setTimeout(r, 5));
+
+      // First block should be silent again (original start)
+      const { L } = worklet.processBlock();
+      expect(L.every(v => Math.abs(v) < 1e-7)).toBe(true);
+    });
+
+    it('cross-track MoveRegion updates region trackId', async () => {
+      const { session } = await makeSession();
+      await session.execute(session.makeAddTrack(tonePCM(256), null, 256, 44100, 'Track A'));
+      await session.execute(session.makeAddTrack(tonePCM(256), null, 256, 44100, 'Track B'));
+
+      const state = session.getState();
+      const trackIds = [...state.tracks.keys()];
+      const [trackAId, trackBId] = trackIds;
+      const regionId = [...state.arrange.regions.values()].find(r => r.trackId === trackAId)!.regionId;
+
+      // Move the region from Track A to Track B
+      await session.execute(session.makeMoveRegion(regionId, 0, trackBId));
+
+      const movedRegion = session.getState().arrange.regions.get(regionId)!;
+      expect(movedRegion.trackId).toBe(trackBId);
+    });
+
+    it('undo cross-track MoveRegion restores original trackId', async () => {
+      const { session } = await makeSession();
+      await session.execute(session.makeAddTrack(tonePCM(256), null, 256, 44100, 'Track A'));
+      await session.execute(session.makeAddTrack(tonePCM(256), null, 256, 44100, 'Track B'));
+
+      const state = session.getState();
+      const trackIds = [...state.tracks.keys()];
+      const [trackAId, trackBId] = trackIds;
+      const regionId = [...state.arrange.regions.values()].find(r => r.trackId === trackAId)!.regionId;
+
+      await session.execute(session.makeMoveRegion(regionId, 0, trackBId));
+      await session.undo();
+
+      const restoredRegion = session.getState().arrange.regions.get(regionId)!;
+      expect(restoredRegion.trackId).toBe(trackAId);
+    });
+
+    it('cross-track MoveRegion applies destination track settings (mute) to WASM slot', async () => {
+      const { session, worklet } = await makeSession();
+      await session.execute(session.makeAddTrack(tonePCM(1024, 0.5), null, 1024, 44100, 'Source'));
+      await session.execute(session.makeAddTrack(silentPCM(256), null, 256, 44100, 'Dest'));
+
+      const state = session.getState();
+      const trackIds = [...state.tracks.keys()];
+      const [srcId, destId] = trackIds;
+
+      // Mute the destination track before the move
+      await session.execute(session.makeSetMute(destId, true));
+
+      const regionId = [...state.arrange.regions.values()].find(r => r.trackId === srcId)!.regionId;
+
+      // Move source region to the muted destination track
+      await session.execute(session.makeMoveRegion(regionId, 0, destId));
+
+      // Verify region's trackId updated
+      expect(session.getState().arrange.regions.get(regionId)!.trackId).toBe(destId);
+
+      // The moved region's WASM slot should now be muted (dest track settings applied)
+      worklet.postMessage({ type: 'cmd', fn: 'engine_play' });
+      await new Promise((r) => setTimeout(r, 5));
+      const { L } = worklet.processBlock();
+      expect(L.every(v => Math.abs(v) < 1e-7)).toBe(true);
     });
   });
 
