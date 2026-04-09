@@ -36,6 +36,9 @@
 #define CHORUS_PARAM_RATE    1
 #define CHORUS_PARAM_DEPTH   2
 #define CHORUS_PARAM_MIX     3
+/* Macro control: sets swing depth + LFO rate together from a single 0–100 value.
+   Small = subtle/tight/faster.  Large = wide/spacious/slower. */
+#define CHORUS_PARAM_SIZE    4
 
 /* ── Reverb param IDs ── */
 #define REV_PARAM_ENABLED    0

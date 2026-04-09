@@ -81,7 +81,7 @@ export function DSPOverlay({ session, track, anchorRect, onClose }: DSPOverlayPr
             <DelayPanel session={session} track={track} />
           </section>
           <section className="dsp-overlay-section">
-            <div className="dsp-overlay-section-label">Chorus</div>
+            <div className="dsp-overlay-section-label">Dimension</div>
             <ChorusPanel session={session} track={track} />
           </section>
           <section className="dsp-overlay-section">
