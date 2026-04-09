@@ -86,9 +86,7 @@ export class SimulatedWorklet implements IWorkletPort {
         if (pcmR) M.HEAPF32.set(pcmR, pR >> 2);
 
         const id = M._engine_add_track(pL, pR, numFrames, sampleRate);
-
-        M._free(pL);
-        if (pR) M._free(pR);
+        // pL/pR ownership transferred to the engine; track_free() will free() them.
 
         this.onmessage?.({ data: { type: 'track_added', id, seq } });
         break;

@@ -3,8 +3,8 @@
 // Receives raw WASM bytes from the main thread via postMessage (transferred
 // as an ArrayBuffer) then compiles and instantiates them asynchronously.
 //
-// Import contract (Emscripten 5, fixed memory, no ALLOW_MEMORY_GROWTH):
-//   WASM imports:  env.emscripten_resize_heap  (stubbed)
+// Import contract (Emscripten 5, ALLOW_MEMORY_GROWTH=1):
+//   WASM imports:  env.emscripten_resize_heap  (calls memory.grow())
 //   WASM exports:  memory, malloc, free, engine_*
 
 class MixerProcessor extends AudioWorkletProcessor {
@@ -32,11 +32,27 @@ class MixerProcessor extends AudioWorkletProcessor {
 
   async _initWasm(wasmData) {
     try {
-      const imports = { env: { emscripten_resize_heap: () => 0 } };
+      // heapMemory is set after instantiation so the stub can call memory.grow().
+      // emscripten_resize_heap(requested_size) is called by malloc when it needs
+      // to expand the heap; returning 1 means success, 0 means OOM.
+      let heapMemory = null;
+      const imports = {
+        env: {
+          emscripten_resize_heap: (requested_size) => {
+            if (!heapMemory) return 0;
+            const cur   = heapMemory.buffer.byteLength;
+            const delta = Math.ceil((requested_size - cur) / 65536);
+            if (delta <= 0) return 1;
+            try { heapMemory.grow(delta); return 1; }
+            catch { return 0; }
+          },
+        },
+      };
       const result = await WebAssembly.instantiate(wasmData, imports);
       // instantiate returns a WebAssembly.Instance when given a compiled Module,
       // or { module, instance } when given raw bytes.
       const instance = result instanceof WebAssembly.Instance ? result : result.instance;
+      heapMemory   = instance.exports.memory; // wire up the resize stub
       this.exports = instance.exports;
       this.outPtrL = this.exports.malloc(128 * 4);
       this.outPtrR = this.exports.malloc(128 * 4);
@@ -64,10 +80,16 @@ class MixerProcessor extends AudioWorkletProcessor {
         heap.set(pcmL, pL >> 2);
         if (pcmR) heap.set(pcmR, pR >> 2);
 
-        const id = e.engine_add_track(pL, pR, numFrames, sampleRate);
+        if (pL === 0) {
+          // malloc returned NULL — heap could not grow (OOM).
+          this.port.postMessage({ type: 'error', message: 'OOM: malloc failed for PCM buffer', seq });
+          if (pR) e.free(pR);
+          break;
+        }
 
-        e.free(pL);
-        if (pR) e.free(pR);
+        const id = e.engine_add_track(pL, pR, numFrames, sampleRate);
+        // pL / pR ownership transferred to the engine.
+        // track_free() (called by engine_remove_track) will free() them.
 
         // Echo seq so AudioEngine can resolve the right pending promise.
         this.port.postMessage({ type: 'track_added', id, seq });

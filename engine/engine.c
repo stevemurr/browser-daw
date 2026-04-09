@@ -45,16 +45,12 @@ int engine_add_track(float* pcm_L, float* pcm_R,
         if (!g_tracks[i].active) {
             track_init(&g_tracks[i], sample_rate);
 
-            /* Copy PCM into engine-owned memory */
-            g_tracks[i].pcm_L = (float*)malloc(num_frames * sizeof(float));
-            memcpy(g_tracks[i].pcm_L, pcm_L, num_frames * sizeof(float));
-
-            if (pcm_R) {
-                g_tracks[i].pcm_R = (float*)malloc(num_frames * sizeof(float));
-                memcpy(g_tracks[i].pcm_R, pcm_R, num_frames * sizeof(float));
-            } else {
-                g_tracks[i].pcm_R = NULL; /* track.c handles mono fallback */
-            }
+            /* Take ownership of the caller-allocated PCM buffers.
+               The worklet allocates them with malloc(); track_free() will free()
+               them.  This avoids a second malloc+memcpy and halves peak memory
+               during loading (one copy in the heap, not two). */
+            g_tracks[i].pcm_L = pcm_L;
+            g_tracks[i].pcm_R = pcm_R; /* NULL for mono — track.c handles fallback */
 
             g_tracks[i].num_frames = num_frames;
             g_tracks[i].active     = 1;

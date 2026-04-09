@@ -770,14 +770,83 @@ async function createWasm() {
   var __abort_js = () =>
       abort('native code called abort()');
 
-  var abortOnCannotGrowMemory = (requestedSize) => {
-      abort(`Cannot enlarge memory arrays to size ${requestedSize} bytes (OOM). Either (1) compile with -sINITIAL_MEMORY=X with X higher than the current value ${HEAP8.length}, (2) compile with -sALLOW_MEMORY_GROWTH which allows increasing the size at runtime, or (3) if you want malloc to return NULL (0) instead of this abort, compile with -sABORTING_MALLOC=0`);
+  var getHeapMax = () =>
+      // Stay one Wasm page short of 4GB: while e.g. Chrome is able to allocate
+      // full 4GB Wasm memories, the size will wrap back to 0 bytes in Wasm side
+      // for any code that deals with heap sizes, which would require special
+      // casing all heap size related code to treat 0 specially.
+      2147483648;
+  
+  var alignMemory = (size, alignment) => {
+      assert(alignment, "alignment argument is required");
+      return Math.ceil(size / alignment) * alignment;
+    };
+  
+  var growMemory = (size) => {
+      var oldHeapSize = wasmMemory.buffer.byteLength;
+      var pages = ((size - oldHeapSize + 65535) / 65536) | 0;
+      try {
+        // round size grow request up to wasm page size (fixed 64KB per spec)
+        wasmMemory.grow(pages); // .grow() takes a delta compared to the previous size
+        updateMemoryViews();
+        return 1 /*success*/;
+      } catch(e) {
+        err(`growMemory: Attempted to grow heap from ${oldHeapSize} bytes to ${size} bytes, but got error: ${e}`);
+      }
+      // implicit 0 return to save code size (caller will cast "undefined" into 0
+      // anyhow)
     };
   var _emscripten_resize_heap = (requestedSize) => {
       var oldSize = HEAPU8.length;
       // With CAN_ADDRESS_2GB or MEMORY64, pointers are already unsigned.
       requestedSize >>>= 0;
-      abortOnCannotGrowMemory(requestedSize);
+      // With multithreaded builds, races can happen (another thread might increase the size
+      // in between), so return a failure, and let the caller retry.
+      assert(requestedSize > oldSize);
+  
+      // Memory resize rules:
+      // 1.  Always increase heap size to at least the requested size, rounded up
+      //     to next page multiple.
+      // 2a. If MEMORY_GROWTH_LINEAR_STEP == -1, excessively resize the heap
+      //     geometrically: increase the heap size according to
+      //     MEMORY_GROWTH_GEOMETRIC_STEP factor (default +20%), At most
+      //     overreserve by MEMORY_GROWTH_GEOMETRIC_CAP bytes (default 96MB).
+      // 2b. If MEMORY_GROWTH_LINEAR_STEP != -1, excessively resize the heap
+      //     linearly: increase the heap size by at least
+      //     MEMORY_GROWTH_LINEAR_STEP bytes.
+      // 3.  Max size for the heap is capped at 2048MB-WASM_PAGE_SIZE, or by
+      //     MAXIMUM_MEMORY, or by ASAN limit, depending on which is smallest
+      // 4.  If we were unable to allocate as much memory, it may be due to
+      //     over-eager decision to excessively reserve due to (3) above.
+      //     Hence if an allocation fails, cut down on the amount of excess
+      //     growth, in an attempt to succeed to perform a smaller allocation.
+  
+      // A limit is set for how much we can grow. We should not exceed that
+      // (the wasm binary specifies it, so if we tried, we'd fail anyhow).
+      var maxHeapSize = getHeapMax();
+      if (requestedSize > maxHeapSize) {
+        err(`Cannot enlarge memory, requested ${requestedSize} bytes, but the limit is ${maxHeapSize} bytes!`);
+        return false;
+      }
+  
+      // Loop through potential heap size increases. If we attempt a too eager
+      // reservation that fails, cut down on the attempted size and reserve a
+      // smaller bump instead. (max 3 times, chosen somewhat arbitrarily)
+      for (var cutDown = 1; cutDown <= 4; cutDown *= 2) {
+        var overGrownHeapSize = oldSize * (1 + 0.2 / cutDown); // ensure geometric growth
+        // but limit overreserving (default to capping at +96MB overgrowth at most)
+        overGrownHeapSize = Math.min(overGrownHeapSize, requestedSize + 100663296 );
+  
+        var newSize = Math.min(maxHeapSize, alignMemory(Math.max(requestedSize, overGrownHeapSize), 65536));
+  
+        var replacement = growMemory(newSize);
+        if (replacement) {
+  
+          return true;
+        }
+      }
+      err(`Failed to grow the heap from ${oldSize} bytes to ${newSize} bytes, not enough memory!`);
+      return false;
     };
 
   var UTF8Decoder = globalThis.TextDecoder && new TextDecoder();
@@ -986,8 +1055,6 @@ Module['FS_createPreloadedFile'] = FS.createPreloadedFile;
   'createNamedFunction',
   'zeroMemory',
   'exitJS',
-  'getHeapMax',
-  'growMemory',
   'withStackSave',
   'strError',
   'inetPton4',
@@ -1010,7 +1077,6 @@ Module['FS_createPreloadedFile'] = FS.createPreloadedFile;
   'maybeExit',
   'asyncLoad',
   'asmjsMangle',
-  'alignMemory',
   'mmapAlloc',
   'HandleAllocator',
   'getUniqueRunDependency',
@@ -1183,7 +1249,8 @@ missingLibrarySymbols.forEach(missingLibrarySymbol)
   'stackSave',
   'stackRestore',
   'ptrToString',
-  'abortOnCannotGrowMemory',
+  'getHeapMax',
+  'growMemory',
   'ENV',
   'ERRNO_CODES',
   'DNS',
@@ -1192,6 +1259,7 @@ missingLibrarySymbols.forEach(missingLibrarySymbol)
   'timers',
   'warnOnce',
   'readEmAsmArgsArray',
+  'alignMemory',
   'wasmTable',
   'wasmMemory',
   'noExitRuntime',
@@ -1385,7 +1453,6 @@ function checkIncomingModuleAPI() {
 
 // Imports from the Wasm binary.
 var _engine_add_track = Module['_engine_add_track'] = makeInvalidEarlyAccess('_engine_add_track');
-var _malloc = Module['_malloc'] = makeInvalidEarlyAccess('_malloc');
 var _engine_remove_track = Module['_engine_remove_track'] = makeInvalidEarlyAccess('_engine_remove_track');
 var _engine_get_track_count = Module['_engine_get_track_count'] = makeInvalidEarlyAccess('_engine_get_track_count');
 var _engine_set_gain = Module['_engine_set_gain'] = makeInvalidEarlyAccess('_engine_set_gain');
@@ -1401,6 +1468,7 @@ var _engine_get_playhead = Module['_engine_get_playhead'] = makeInvalidEarlyAcce
 var _engine_is_playing = Module['_engine_is_playing'] = makeInvalidEarlyAccess('_engine_is_playing');
 var _engine_set_master_gain = Module['_engine_set_master_gain'] = makeInvalidEarlyAccess('_engine_set_master_gain');
 var _engine_alloc_pcm = Module['_engine_alloc_pcm'] = makeInvalidEarlyAccess('_engine_alloc_pcm');
+var _malloc = Module['_malloc'] = makeInvalidEarlyAccess('_malloc');
 var _engine_free_pcm = Module['_engine_free_pcm'] = makeInvalidEarlyAccess('_engine_free_pcm');
 var _free = Module['_free'] = makeInvalidEarlyAccess('_free');
 var _engine_process = Module['_engine_process'] = makeInvalidEarlyAccess('_engine_process');
@@ -1419,7 +1487,6 @@ var wasmMemory = makeInvalidEarlyAccess('wasmMemory');
 
 function assignWasmExports(wasmExports) {
   assert(typeof wasmExports['engine_add_track'] != 'undefined', 'missing Wasm export: engine_add_track');
-  assert(typeof wasmExports['malloc'] != 'undefined', 'missing Wasm export: malloc');
   assert(typeof wasmExports['engine_remove_track'] != 'undefined', 'missing Wasm export: engine_remove_track');
   assert(typeof wasmExports['engine_get_track_count'] != 'undefined', 'missing Wasm export: engine_get_track_count');
   assert(typeof wasmExports['engine_set_gain'] != 'undefined', 'missing Wasm export: engine_set_gain');
@@ -1435,6 +1502,7 @@ function assignWasmExports(wasmExports) {
   assert(typeof wasmExports['engine_is_playing'] != 'undefined', 'missing Wasm export: engine_is_playing');
   assert(typeof wasmExports['engine_set_master_gain'] != 'undefined', 'missing Wasm export: engine_set_master_gain');
   assert(typeof wasmExports['engine_alloc_pcm'] != 'undefined', 'missing Wasm export: engine_alloc_pcm');
+  assert(typeof wasmExports['malloc'] != 'undefined', 'missing Wasm export: malloc');
   assert(typeof wasmExports['engine_free_pcm'] != 'undefined', 'missing Wasm export: engine_free_pcm');
   assert(typeof wasmExports['free'] != 'undefined', 'missing Wasm export: free');
   assert(typeof wasmExports['engine_process'] != 'undefined', 'missing Wasm export: engine_process');
@@ -1450,7 +1518,6 @@ function assignWasmExports(wasmExports) {
   assert(typeof wasmExports['memory'] != 'undefined', 'missing Wasm export: memory');
   assert(typeof wasmExports['__indirect_function_table'] != 'undefined', 'missing Wasm export: __indirect_function_table');
   _engine_add_track = Module['_engine_add_track'] = createExportWrapper('engine_add_track', 4);
-  _malloc = Module['_malloc'] = createExportWrapper('malloc', 1);
   _engine_remove_track = Module['_engine_remove_track'] = createExportWrapper('engine_remove_track', 1);
   _engine_get_track_count = Module['_engine_get_track_count'] = createExportWrapper('engine_get_track_count', 0);
   _engine_set_gain = Module['_engine_set_gain'] = createExportWrapper('engine_set_gain', 2);
@@ -1466,6 +1533,7 @@ function assignWasmExports(wasmExports) {
   _engine_is_playing = Module['_engine_is_playing'] = createExportWrapper('engine_is_playing', 0);
   _engine_set_master_gain = Module['_engine_set_master_gain'] = createExportWrapper('engine_set_master_gain', 1);
   _engine_alloc_pcm = Module['_engine_alloc_pcm'] = createExportWrapper('engine_alloc_pcm', 1);
+  _malloc = Module['_malloc'] = createExportWrapper('malloc', 1);
   _engine_free_pcm = Module['_engine_free_pcm'] = createExportWrapper('engine_free_pcm', 1);
   _free = Module['_free'] = createExportWrapper('free', 1);
   _engine_process = Module['_engine_process'] = createExportWrapper('engine_process', 3);
