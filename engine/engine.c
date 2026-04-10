@@ -205,7 +205,11 @@ void engine_plugin_set_param(int id, int plugin_id, int param_id, float value) {
 
 /* ---- Transport ---- */
 void  engine_play (void) { g_playing = 1; }
-void  engine_pause(void) { g_playing = 0; }
+void  engine_pause(void) {
+    g_playing      = 0;
+    g_pending_seek = -1;
+    g_seek_ramp    = 0;
+}
 static void reset_all_dsp(void) {
     for (int i = 0; i < MAX_TRACKS; i++) {
         for (int b = 0; b < 3; b++) {
@@ -223,7 +227,9 @@ static void reset_all_dsp(void) {
 void  engine_seek (long pos) {
     if (!g_playing) {
         /* Paused: apply immediately — no audible transition needed. */
-        g_playhead = pos;
+        g_playhead     = pos;
+        g_pending_seek = -1;
+        g_seek_ramp    = 0;
         reset_all_dsp();
         return;
     }

@@ -49,6 +49,9 @@ void test_seek_zero_reads_silent_region(void) {
 void test_seek_512_reads_signal_region(void) {
     float out_L[FRAMES], out_R[FRAMES];
     engine_seek(512);
+    /* Deferred seek: first block fades out from the old position (silent). */
+    engine_process(out_L, out_R, FRAMES);
+    /* Seek is applied at the start of this block; fade-in reads from 512. */
     engine_process(out_L, out_R, FRAMES);
 
     int non_zero = 0;
@@ -73,6 +76,9 @@ void test_seek_resets_biquad_state(void) {
 
     /* engine_seek() must flush biquad state; the silent region must stay silent */
     engine_seek(0);
+    /* Deferred seek: first block fades out from the signal region (non-zero). */
+    engine_process(out_L, out_R, FRAMES);
+    /* Seek applied at start of this block: biquad reset, fade-in from silent. */
     engine_process(out_L, out_R, FRAMES);
 
     for (int i = 0; i < FRAMES; i++) {
