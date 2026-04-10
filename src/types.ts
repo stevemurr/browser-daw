@@ -47,6 +47,7 @@ export interface TrackMirror {
 export interface SessionState {
   tracks: Map<string, TrackMirror>;  // keyed by stableId
   masterGain: number;
+  bpm: number;
   canUndo: boolean;
   canRedo: boolean;
   undoLabel: string | null;

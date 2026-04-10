@@ -83,6 +83,9 @@ export async function restoreSession(
   session._setMasterGain(saved.masterGain);
   engine.setMasterGain(saved.masterGain);
 
+  // Restore BPM (display-only; defaults to 120 if missing from older sessions)
+  session._setBpm(saved.bpm ?? 120);
+
   // Determine which audio files still exist in OPFS
   const existing     = await store.listFiles();
   const existingSet  = new Set(existing.map(f => f.fileId));

@@ -42,6 +42,7 @@ export interface SerializedSession {
   createdAt: number;
   updatedAt: number;
   masterGain: number;
+  bpm: number;
   tracks: SerializedTrack[];
 }
 
@@ -63,6 +64,8 @@ export class Session {
   private regions = new Map<string, Region>();
   private waveformPeaks = new Map<string, WaveformPeaks>(); // keyed by regionId
 
+  private bpm = 120;
+
   private continuous: { description: string } | null = null;
   private subscribers = new Set<(s: SessionState) => void>();
 
@@ -78,6 +81,7 @@ export class Session {
     return {
       tracks:     new Map(this.tracks),
       masterGain: this.masterGain,
+      bpm:        this.bpm,
       canUndo:    this.undoStack.length > 0,
       canRedo:    this.redoStack.length > 0,
       undoLabel:  this.undoStack.at(-1)?.description ?? null,
@@ -222,6 +226,10 @@ export class Session {
     this.masterGain = value;
   }
 
+  _setBpm(value: number): void {
+    this.bpm = Math.max(30, Math.min(300, Math.round(value)));
+  }
+
   _registerRegion(region: Region): void {
     this.regions.set(region.regionId, region);
   }
@@ -320,6 +328,15 @@ export class Session {
     return new SetPanCommand(this, this.engine, stableId, from, to);
   }
 
+  makeSetGainAndPan(stableId: string, toGain: number, toPan: number): Command {
+    const track = this.tracks.get(stableId);
+    return new SetGainAndPanCommand(
+      this, this.engine, stableId,
+      track?.gain ?? 1.0, track?.pan ?? 0.0,
+      toGain, toPan,
+    );
+  }
+
   makeSetMute(stableId: string, muted: boolean): Command {
     const from = this.tracks.get(stableId)?.muted ?? false;
     return new SetMuteCommand(this, this.engine, stableId, from, muted);
@@ -340,6 +357,10 @@ export class Session {
 
   makeSetMasterGain(to: number): Command {
     return new SetMasterGainCommand(this, this.engine, this.masterGain, to);
+  }
+
+  makeSetBpm(to: number): Command {
+    return new SetBpmCommand(this, this.bpm, Math.max(30, Math.min(300, Math.round(to))));
   }
 
   /** Snapshot all non-volatile state to a plain JSON-serializable object. */
@@ -377,6 +398,7 @@ export class Session {
       createdAt:  createdAt ?? Date.now(),
       updatedAt:  Date.now(),
       masterGain: this.masterGain,
+      bpm:        this.bpm,
       tracks,
     };
   }
@@ -726,6 +748,32 @@ class SetPanCommand implements Command {
   }
 }
 
+class SetGainAndPanCommand implements Command {
+  readonly description = 'Set Gain & Pan';
+  constructor(
+    private session: Session, private engine: AudioEngine,
+    private stableId: string,
+    private fromGain: number, private fromPan: number,
+    private toGain: number, private toPan: number,
+  ) {}
+
+  async execute(): Promise<void> {
+    for (const region of this.session.regionsForTrack(this.stableId)) {
+      this.engine.setGain(region.engineSlot, this.toGain);
+      this.engine.setPan(region.engineSlot, this.toPan);
+    }
+    this.session._updateTrack(this.stableId, { gain: this.toGain, pan: this.toPan });
+  }
+
+  async undo(): Promise<void> {
+    for (const region of this.session.regionsForTrack(this.stableId)) {
+      this.engine.setGain(region.engineSlot, this.fromGain);
+      this.engine.setPan(region.engineSlot, this.fromPan);
+    }
+    this.session._updateTrack(this.stableId, { gain: this.fromGain, pan: this.fromPan });
+  }
+}
+
 class SetMuteCommand implements Command {
   readonly description = 'Set Mute';
   constructor(
@@ -816,6 +864,25 @@ class SetMasterGainCommand implements Command {
   async undo(): Promise<void> {
     this.engine.setMasterGain(this.from);
     this.session._setMasterGain(this.from);
+  }
+}
+
+class SetBpmCommand implements Command {
+  readonly description = 'Set BPM';
+  constructor(
+    private session: Session,
+    private from: number,
+    private to: number,
+  ) {}
+
+  async execute(): Promise<void> {
+    this.session._setBpm(this.to);
+    this.session._triggerNotify();
+  }
+
+  async undo(): Promise<void> {
+    this.session._setBpm(this.from);
+    this.session._triggerNotify();
   }
 }
 

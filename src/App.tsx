@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { AudioEngine } from './AudioEngine.js';
 import { Session } from './Session.js';
 import { OPFSAudioFileStore } from './store/AudioFileStore.js';
@@ -6,6 +6,7 @@ import { ChunkCacheManager } from './ChunkCacheManager.js';
 import type { SessionState } from './types.js';
 import { Transport } from './components/Transport.js';
 import { ArrangeView } from './components/ArrangeView.js';
+import type { Subdivision } from './components/RulerAdapter.js';
 import { useKeyboard } from './hooks/useKeyboard.js';
 import { useSessionAutoSave } from './hooks/useSessionAutoSave.js';
 import { MemoryPanel } from './components/MemoryPanel.js';
@@ -21,6 +22,9 @@ export default function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [playhead, setPlayhead]   = useState(0);
   const [initError, setInitError] = useState<string | null>(null);
+
+  // Subdivision is a view preference — not persisted in session
+  const [subdivision, setSubdivision] = useState<Subdivision>('1/4');
 
   // Session identity state (for rendering)
   const [sessionId, setSessionId]             = useState<string | null>(null);
@@ -296,6 +300,30 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [handleSwitchSession]);
 
+  // ── BPM ────────────────────────────────────────────────────────────────────
+
+  // Local live BPM for real-time ruler preview during wheel scroll.
+  // The session state (state.bpm) only updates on commit so the undo stack
+  // captures the correct before/after values.
+  const [localBpm, setLocalBpm] = useState(120);
+
+  // Keep localBpm in sync when session state changes (undo/redo/session switch)
+  useEffect(() => {
+    if (state) setLocalBpm(state.bpm);
+  }, [state?.bpm]);
+
+  const handleBpmChange = useCallback((bpm: number) => {
+    // Live preview only — do NOT touch session state here, or makeSetBpm
+    // will capture the wrong 'from' value when the commit runs.
+    setLocalBpm(bpm);
+  }, []);
+
+  const handleBpmCommit = useCallback((bpm: number) => {
+    const sess = sessionRef.current;
+    if (!sess) return;
+    sess.execute(sess.makeSetBpm(bpm));
+  }, [sessionRef]);
+
   // ── Keyboard shortcuts ─────────────────────────────────────────────────────
 
   useKeyboard({
@@ -335,6 +363,11 @@ export default function App() {
             onPlay={handlePlay}
             onPause={handlePause}
             onSeek={handleSeek}
+            bpm={localBpm}
+            onBpmChange={handleBpmChange}
+            onBpmCommit={handleBpmCommit}
+            subdivision={subdivision}
+            onSubdivisionChange={setSubdivision}
             sessionId={sessionId}
             sessionName={sessionName}
             sessions={sessionList}
@@ -349,6 +382,8 @@ export default function App() {
             playhead={playhead}
             onSeek={handleSeek}
             audioContext={ctxRef.current}
+            bpm={localBpm}
+            subdivision={subdivision}
           />
           {import.meta.env.DEV && engineRef.current && chunksRef.current && storeRef.current && (
             <MemoryPanel

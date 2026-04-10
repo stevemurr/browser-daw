@@ -1,8 +1,9 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import type { Session } from '../Session.js';
 import type { SessionState, RegionView, WaveformPeaks } from '../types.js';
 import { computePeaksAsync } from '../waveform.js';
 import { Ruler } from './Ruler.js';
+import { BarRulerAdapter, type Subdivision } from './RulerAdapter.js';
 import { TrackLane } from './TrackLane.js';
 import { TrackHeader } from './TrackHeader.js';
 
@@ -35,16 +36,23 @@ interface ArrangeViewProps {
   playhead: number;
   onSeek: (frame: number) => void;
   audioContext: AudioContext | null;
+  bpm: number;
+  subdivision: Subdivision;
 }
 
-export function ArrangeView({ session, state, playhead, onSeek, audioContext }: ArrangeViewProps) {
+export function ArrangeView({ session, state, playhead, onSeek, audioContext, bpm, subdivision }: ArrangeViewProps) {
   const [viewport, setViewport] = useState<Viewport>({
     scrollX: 0,
     pxPerFrame: 0.005,
-    trackHeight: 80,
+    trackHeight: 140,
   });
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
   const [, forceUpdate] = useState(0);
+
+  const rulerAdapter = useMemo(
+    () => new BarRulerAdapter(bpm, subdivision, 44100),
+    [bpm, subdivision],
+  );
 
   const containerRef = useRef<HTMLDivElement>(null);
   const laneAreaRef = useRef<HTMLDivElement>(null);
@@ -185,7 +193,7 @@ export function ArrangeView({ session, state, playhead, onSeek, audioContext }: 
     } else {
       setViewport(vp => ({
         ...vp,
-        scrollX: Math.max(0, vp.scrollX + e.deltaY / vp.pxPerFrame * 0.01),
+        scrollX: Math.max(0, vp.scrollX + e.deltaY / vp.pxPerFrame * 0.0375),
       }));
     }
   }, []);
@@ -324,7 +332,7 @@ export function ArrangeView({ session, state, playhead, onSeek, audioContext }: 
             scrollX={viewport.scrollX}
             pxPerFrame={viewport.pxPerFrame}
             width={Math.max(1, laneWidth)}
-            sampleRate={44100}
+            adapter={rulerAdapter}
           />
         </div>
       </div>
