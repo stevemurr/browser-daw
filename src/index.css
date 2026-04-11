@@ -334,7 +334,7 @@ body { background: #1a1a1a; color: #e0e0e0; font-family: monospace; }
 /* ── Region block ───────────────────────────────────────────────────────── */
 .region-block {
   border: 1px solid #3a5a80;
-  border-radius: 2px;
+  border-radius: 6px;
   overflow: hidden;
   box-sizing: border-box;
 }

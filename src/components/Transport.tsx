@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { Session } from '../Session.js';
 import type { SessionState } from '../types.js';
-import { linearToDb, dbToLinear, formatDb } from '../waveform.js';
 import { SessionSelector } from './SessionSelector.js';
 import type { SessionListItem } from '../store/SessionStore.js';
 import { BarRulerAdapter, type Subdivision } from './RulerAdapter.js';
@@ -89,13 +88,6 @@ export function Transport({
   const ss = String(seconds % 60).padStart(2, '0');
   const barAdapter = new BarRulerAdapter(localBpm, subdivision, 44100);
   const barPosition = barAdapter.frameToLabel(playhead);
-
-  // ── Master gain ─────────────────────────────────────────────────────────────
-  const [localDb, setLocalDb] = useState(() => linearToDb(state.masterGain));
-  const gainDragging = useRef(false);
-  useEffect(() => {
-    if (!gainDragging.current) setLocalDb(linearToDb(state.masterGain));
-  }, [state.masterGain]);
 
   const [exporting, setExporting] = useState(false);
 
@@ -192,27 +184,6 @@ export function Transport({
       >
         ↪ Redo
       </button>
-
-      <span className="transport-sep">|</span>
-
-      <label className="transport-label">Master</label>
-      <input
-        type="range" min={-60} max={6} step={0.1}
-        value={localDb}
-        className="transport-master-slider"
-        onMouseDown={() => { gainDragging.current = true; }}
-        onChange={e => {
-          const db = parseFloat(e.target.value);
-          setLocalDb(db);
-          session.getEngine().setMasterGain(dbToLinear(db));
-        }}
-        onMouseUp={e => {
-          gainDragging.current = false;
-          const db = parseFloat((e.target as HTMLInputElement).value);
-          session.execute(session.makeSetMasterGain(dbToLinear(db)));
-        }}
-      />
-      <span className="transport-label">{formatDb(localDb)}</span>
 
       <button
         className="btn-export"
